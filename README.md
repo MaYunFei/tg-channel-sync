@@ -1,6 +1,7 @@
 # tg-channel-sync (杏铃同步台)
 
 一款基于 Web UI 管理的 Telegram 频道同步、复制、数据迁移工具。采用 FastAPI + Vue3 前后端分离架构，支持频道实时监听、多模式历史数据爬取、断点续传以及基于正则表达式的高级内容过滤。
+**ToDo**：下载重传模式可选修改文件哈希；支持话题模式；完成JSON模式功能；解决issues🥳
 
 [GitHub 仓库](https://github.com/RRHTY/tg-channel-sync)
 
