@@ -80,7 +80,8 @@ const SyncPanel = {
                 <div class="text-xs text-gray-500"><p>跳过: {{status.skipped}}</p><p class="truncate text-blue-500 font-bold mt-1">{{status.current_text}}</p></div>
             </div>
             <div class="space-y-4" :class="{'opacity-50 pointer-events-none': status.is_syncing}">
-                <div class="flex gap-2"><input v-model="form.source_id" placeholder="源频道ID/URL" class="input-box"><input v-model="form.target_id" placeholder="目标频道ID/URL" class="input-box"></div>
+                <div v-if="form.mode!=='json'" class="flex gap-2"><input v-model="form.source_id" placeholder="源频道ID/URL" class="input-box"><input v-model="form.target_id" placeholder="目标频道ID/URL" class="input-box"></div>
+                <div v-else class="space-y-2"><input v-model="form.target_id" placeholder="目标频道ID/URL" class="input-box"><input v-model="form.json_path" placeholder="JSON文件路径 (如: C:/path/to/result.json)" class="input-box font-mono text-sm"></div>
                 <div class="flex bg-white rounded-lg border p-1">
                     <button @click="form.mode='json'" :class="form.mode==='json'?'bg-blue-100 text-blue-700 font-semibold':'text-gray-500'" class="flex-1 py-1 text-sm rounded">JSON导入</button>
                     <button @click="form.mode='api'" :class="form.mode==='api'?'bg-purple-100 text-purple-700 font-semibold':'text-gray-500'" class="flex-1 py-1 text-sm rounded">API复制</button>
@@ -97,7 +98,6 @@ const SyncPanel = {
                     <label><input type="radio" v-model="form.sender" value="user" class="ml-4 mr-1">辅助账号</label>
                 </div>
                 <div v-if="form.mode==='api'||form.mode==='clone'" class="flex gap-2"><input v-model="form.start_id" type="number" placeholder="起始ID" class="input-box"><input v-model="form.end_id" type="number" placeholder="结束ID" class="input-box"></div>
-                <div v-if="form.mode==='json'"><input v-model="form.json_path" placeholder="JSON文件路径" class="input-box"></div>
                 <div><label class="text-xs">单条处理延时(秒): <span class="text-gray-400">最少0.5</span></label><input v-model="form.delay" type="number" step="0.5" min="0.5" class="input-box"></div>
             </div>
             <button v-if="!status.is_syncing" @click="$emit('start', form)" class="btn-primary mt-4 bg-gray-800 hover:bg-gray-900">启动 {{form.mode.toUpperCase()}} 任务</button>

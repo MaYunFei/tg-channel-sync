@@ -8,7 +8,7 @@ venv/
 .venv/
 env/
 
-临时文件
+# 临时文件
 temp/
 .restart_flag
 
@@ -16,7 +16,7 @@ temp/
 .env
 *.session
 *.session-journal
-data.db
+*.db
 
 # 编辑器配置
 .idea/

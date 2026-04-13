@@ -2,12 +2,6 @@ import logging
 import os
 import asyncio
 from dotenv import load_dotenv
-from aiogram import Bot, Dispatcher
-from aiogram.client.session.aiohttp import AiohttpSession
-from aiogram.types import Message
-from aiogram.exceptions import TelegramRetryAfter
-from pyrogram import Client
-import database as db
 
 load_dotenv()
 
@@ -15,10 +9,31 @@ API_ID = int(os.getenv("API_ID", "0").strip() or 0)
 API_HASH = os.getenv("API_HASH", "").strip()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
+PROXY_HOST = os.getenv("PROXY_HOST", "").strip()
+PROXY_PORT = int(os.getenv("PROXY_PORT", "7897").strip() or 7897)
+PROXY_USER = os.getenv("PROXY_USER", "").strip()
+PROXY_PASS = os.getenv("PROXY_PASS", "").strip()
+
+from aiogram import Bot, Dispatcher
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.types import Message
+from aiogram.exceptions import TelegramRetryAfter
+from pyrogram import Client
+import database as db
+from aiohttp import ClientTimeout
+
+def build_proxy_url():
+    if not PROXY_HOST: return None
+    if PROXY_USER and PROXY_PASS:
+        return f"socks5://{PROXY_USER}:{PROXY_PASS}@{PROXY_HOST}:{PROXY_PORT}"
+    return f"socks5://{PROXY_HOST}:{PROXY_PORT}"
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 if not BOT_TOKEN: raise ValueError("❌ 错误：未在 .env 中找到 BOT_TOKEN。")
 
-session = AiohttpSession(timeout=3600)
+proxy_url = build_proxy_url()
+timeout = ClientTimeout(total=3600, connect=60, sock_connect=60)
+session = AiohttpSession(timeout=timeout, proxy=proxy_url)
 aiogram_bot = Bot(token=BOT_TOKEN, session=session)
 dp = Dispatcher()
 media_group_cache = {}
@@ -127,4 +142,18 @@ async def handle_edited_post(message: Message):
 pyro_user_app = None
 def init_user_client():
     global pyro_user_app
-    if API_ID and API_HASH: pyro_user_app = Client("sync_user_session", api_id=API_ID, api_hash=API_HASH, ipv6=False)
+    if API_ID and API_HASH:
+        from pyrogram.connection.transport.tcp.tcp import TCP
+        TCP.TIMEOUT = 60
+        if PROXY_HOST:
+            async def _patched_connect(self, destination):
+                from python_socks.async_.asyncio.v2 import Proxy
+                proxy_url = f"socks5://{PROXY_HOST}:{PROXY_PORT}"
+                if PROXY_USER and PROXY_PASS:
+                    proxy_url = f"socks5://{PROXY_USER}:{PROXY_PASS}@{PROXY_HOST}:{PROXY_PORT}"
+                proxy = Proxy.from_url(proxy_url)
+                sock = await proxy.connect(dest_host=destination[0], dest_port=destination[1])
+                self.reader = sock.reader
+                self.writer = sock.writer
+            TCP._connect = _patched_connect
+        pyro_user_app = Client("sync_user_session", api_id=API_ID, api_hash=API_HASH, ipv6=False)
