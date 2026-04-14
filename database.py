@@ -42,9 +42,10 @@ async def get_all_channel_mappings() -> list:
         cursor = await db.execute("SELECT source_id, target_id FROM channel_mappings")
         return await cursor.fetchall()
 
-async def save_msg_mapping(source_channel_id: int, source_msg_id: int, target_msg_id: int):
+async def save_msg_mapping(source_channel_id: int, source_msg_id: int, target_msg_id: int, overwrite: bool = False):
     async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute("INSERT OR IGNORE INTO message_mappings (source_channel_id, source_msg_id, target_msg_id) VALUES (?, ?, ?)",(source_channel_id, source_msg_id, target_msg_id))
+        sql = "INSERT OR REPLACE INTO message_mappings (source_channel_id, source_msg_id, target_msg_id) VALUES (?, ?, ?)" if overwrite else "INSERT OR IGNORE INTO message_mappings (source_channel_id, source_msg_id, target_msg_id) VALUES (?, ?, ?)"
+        await db.execute(sql, (source_channel_id, source_msg_id, target_msg_id))
         await db.commit()
 
 async def get_target_msg_id(source_channel_id: int, source_msg_id: int) -> int:

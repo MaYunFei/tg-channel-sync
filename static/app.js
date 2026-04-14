@@ -1,12 +1,12 @@
-const { createApp } = Vue;
+﻿const { createApp } = Vue;
 
 const ChannelMapping = {
     props: ['mappings'],
     data() { return { source: '', target: '' } },
     template: `
         <div class="card">
-            <h2 class="text-lg font-semibold mb-1">频道映射</h2>
-            <p class="text-xs text-gray-500 mb-4">实时同步源频道消息到目标频道，支持多组映射</p>
+            <h2 class="text-lg font-semibold mb-1">🔗 频道映射</h2>
+            <p class="text-xs text-gray-500 mb-4">实时同步源频道消息到目标频道，支持多组映射。</p>
             <div class="space-y-3">
                 <div class="flex gap-2">
                     <input v-model="source" type="text" placeholder="源频道ID/URL" class="input-box">
@@ -17,7 +17,7 @@ const ChannelMapping = {
             <ul class="mt-4 space-y-2 text-sm">
                 <li v-for="map in mappings" :key="map.source_id" class="flex justify-between p-2 bg-gray-50 rounded group">
                     <div class="flex-1 flex justify-between px-2 font-mono"><span>{{ map.source_id }}</span><span class="text-gray-400">→</span><span>{{ map.target_id }}</span></div>
-                    <button @click="$emit('del', map.source_id)" class="text-red-500 opacity-0 group-hover:opacity-100 px-2">删除</button>
+                    <button @click="$emit('del', map.source_id)" class="text-red-500 opacity-0 group-hover:opacity-100 px-2">🗑️ 删除</button>
                 </li>
             </ul>
         </div>
@@ -28,15 +28,15 @@ const GlobalFilters = {
     props: ['settings', 'rules', 'newRule'],
     data() {
         return {
-            typeLabels: {'sync_text':'📝 文本','sync_photo':'🖼️ 图片','sync_video':'🎬 视频','sync_document':'📁 文件','sync_audio':'🎵 音乐','sync_voice':'🎤 语音','sync_sticker':'🏷️ 贴纸','sync_gif':'🎞️ 动图'}
+            typeLabels: {'sync_text':'📝 文本','sync_photo':'🖼️ 图片','sync_video':'🎬 视频','sync_document':'📄 文件','sync_audio':'🎵 音频','sync_voice':'🎙️ 语音','sync_sticker':'🏷️ 贴纸','sync_gif':'🎞️ 动图'}
         }
     },
     template: `
         <div class="card">
-            <h2 class="text-lg font-semibold mb-1">全局过滤</h2>
-            <p class="text-xs text-gray-500 mb-4">控制同步消息类型及内容过滤规则</p>
+            <h2 class="text-lg font-semibold mb-1">🧰 全局过滤</h2>
+            <p class="text-xs text-gray-500 mb-4">控制同步消息类型和内容过滤规则。</p>
             <div class="bg-white p-4 rounded-lg mb-6 border border-gray-200 shadow-sm">
-                <h3 class="text-sm font-bold text-gray-800 mb-4">消息类型</h3>
+                <h3 class="text-sm font-bold text-gray-800 mb-4">🧩 消息类型</h3>
                 <div class="grid grid-cols-4 gap-y-4 gap-x-2 mb-5">
                     <label v-for="(label, key) in typeLabels" class="flex items-center text-sm cursor-pointer hover:text-blue-600">
                         <input type="checkbox" v-model="settings[key]" true-value="1" false-value="0" class="mr-1.5 w-4 h-4"> {{ label }}
@@ -46,7 +46,7 @@ const GlobalFilters = {
             </div>
 
             <div class="bg-white p-4 rounded-lg border border-gray-200 shadow-sm">
-                <h3 class="text-sm font-bold text-gray-800 mb-4">正则过滤</h3>
+                <h3 class="text-sm font-bold text-gray-800 mb-4">🪄 正则过滤</h3>
                 <div class="space-y-3 mb-5">
                     <select v-model="newRule.rule_type" class="input-box bg-white">
                         <option value="replace">仅替换文本（命中后替换内容）</option>
@@ -59,8 +59,8 @@ const GlobalFilters = {
                 </div>
                 <ul class="space-y-2 text-sm border-t pt-4">
                     <li v-for="r in rules" :key="r.id" class="flex justify-between p-2 bg-gray-50 rounded group">
-                        <span class="truncate font-mono">{{ r.pattern }} <span v-if="r.rule_type==='replace'" class="text-green-600">→ {{r.replacement||'(抹除)'}}</span></span>
-                        <button @click="$emit('del-rule', r.id)" class="text-red-500 opacity-0 group-hover:opacity-100">删除</button>
+                        <span class="truncate font-mono">{{ r.pattern }} <span v-if="r.rule_type==='replace'" class="text-green-600">→ {{r.replacement||'(删除)'}}</span></span>
+                        <button @click="$emit('del-rule', r.id)" class="text-red-500 opacity-0 group-hover:opacity-100">🗑️ 删除</button>
                     </li>
                 </ul>
             </div>
@@ -72,37 +72,54 @@ const SyncPanel = {
     props: ['status', 'form', 'stopping'],
     template: `
         <div class="card">
-            <h2 class="text-lg font-semibold mb-1">历史同步</h2>
-            <p class="text-xs text-gray-500 mb-4">批量同步指定ID范围内的历史消息到目标频道</p>
+            <h2 class="text-lg font-semibold mb-1">🕘 历史同步</h2>
+            <p class="text-xs text-gray-500 mb-4">批量同步指定 ID 范围内的历史消息到目标频道。</p>
             <div v-if="status.is_syncing" class="mb-6 p-4 bg-white rounded shadow-sm">
-                <div class="flex justify-between text-sm mb-1"><span class="font-medium text-blue-700">运行中: {{status.mode}}</span><span>{{status.current}} / {{status.total}}</span></div>
+                <div class="flex justify-between text-sm mb-1"><span class="font-medium text-blue-700">⏳ 运行中 {{status.mode}}</span><span>{{status.current}} / {{status.total}}</span></div>
                 <div class="w-full bg-gray-200 rounded-full h-2 mb-3"><div class="bg-blue-600 h-2 rounded-full transition-all" :style="{width: (status.total>0?status.current/status.total*100:0)+'%'}"></div></div>
                 <div class="text-xs text-gray-500"><p>跳过: {{status.skipped}}</p><p class="truncate text-blue-500 font-bold mt-1">{{status.current_text}}</p></div>
             </div>
             <div class="space-y-4" :class="{'opacity-50 pointer-events-none': status.is_syncing}">
                 <div v-if="form.mode!=='json'" class="flex gap-2"><input v-model="form.source_id" placeholder="源频道ID/URL" class="input-box"><input v-model="form.target_id" placeholder="目标频道ID/URL" class="input-box"></div>
-                <div v-else class="space-y-2"><input v-model="form.target_id" placeholder="目标频道ID/URL" class="input-box"><input v-model="form.json_path" placeholder="JSON文件路径 (如: C:/path/to/result.json)" class="input-box font-mono text-sm"></div>
+                <div v-else class="space-y-2">
+                    <input v-model="form.target_id" placeholder="目标频道ID/URL" class="input-box">
+                    <input v-model="form.json_path" placeholder="JSON文件路径（如 C:/Users/PC/Downloads/AyuGram Desktop/ChatExport_2026-04-14/result.json）" class="input-box font-mono text-sm">
+                </div>
                 <div class="flex bg-white rounded-lg border p-1">
                     <button @click="form.mode='json'" :class="form.mode==='json'?'bg-blue-100 text-blue-700 font-semibold':'text-gray-500'" class="flex-1 py-1 text-sm rounded">JSON导入</button>
                     <button @click="form.mode='api'" :class="form.mode==='api'?'bg-purple-100 text-purple-700 font-semibold':'text-gray-500'" class="flex-1 py-1 text-sm rounded">API复制</button>
                     <button @click="form.mode='clone'" :class="form.mode==='clone'?'bg-emerald-100 text-emerald-700 font-semibold':'text-gray-500'" class="flex-1 py-1 text-sm rounded">下载重传</button>
                 </div>
-                <div class="text-xs text-gray-500 -mt-2 px-1">
-                    <span v-if="form.mode==='json'">根据导出文件自动复制上传到目标频道</span>
-                    <span v-else-if="form.mode==='api'">通过API无引用转发，速度快</span>
-                    <span v-else-if="form.mode==='clone'">通过API下载再重新上传</span>
+                <div class="text-xs text-gray-500 -mt-2 px-1 space-y-1">
+                    <template v-if="form.mode==='json'">
+                        <p>📁 根据导出目录中的 <code>result.json</code> 和同目录媒体文件自动发送到目标频道。</p>
+                        <p class="text-amber-600">⚠️ 提示：当前不支持从 JSON 原样还原媒体组；检测到贴纸时会按图片模式发送，建议勾选贴纸过滤。</p>
+                    </template>
+                    <template v-else-if="form.mode==='api'">
+                        <p>⚡ 通过 API 直接复制消息，速度更快。</p>
+                    </template>
+                    <template v-else-if="form.mode==='clone'">
+                        <p>📦 通过 API 下载后重新上传，适合需要重新编码或避开直拷限制的场景。</p>
+                    </template>
                 </div>
                 <div v-if="form.mode==='clone'" class="bg-white p-3 rounded border text-sm">
-                    <b>发送身份:</b>
+                    <b>👤 发送身份</b>
                     <label><input type="radio" v-model="form.sender" value="bot" class="ml-2 mr-1">机器人</label>
                     <label><input type="radio" v-model="form.sender" value="user" class="ml-4 mr-1">辅助账号</label>
                 </div>
                 <div v-if="form.mode==='api'||form.mode==='clone'" class="flex gap-2"><input v-model="form.start_id" type="number" placeholder="起始ID" class="input-box"><input v-model="form.end_id" type="number" placeholder="结束ID" class="input-box"></div>
-                <div><label class="text-xs">单条处理延时(秒): <span class="text-gray-400">最少0.5</span></label><input v-model="form.delay" type="number" step="0.5" min="0.5" class="input-box"></div>
+                <div><label class="text-xs">单条处理延时(秒): <span class="text-gray-400">最少 0.5</span></label><input v-model="form.delay" type="number" step="0.5" min="0.5" class="input-box"></div>
+                <label class="flex items-start gap-2 text-sm bg-amber-50 border border-amber-200 rounded p-3">
+                    <input type="checkbox" v-model="form.force_send" true-value="1" false-value="0" class="mt-0.5">
+                    <span>
+                        <b>🚨 强制发送</b>
+                        <span class="block text-xs text-gray-600">🚀 跳过重复和断点检查，直接发送当前选中消息。</span>
+                    </span>
+                </label>
             </div>
-            <button v-if="!status.is_syncing" @click="$emit('start', form)" class="btn-primary mt-4 bg-gray-800 hover:bg-gray-900">启动 {{form.mode.toUpperCase()}} 任务</button>
-            <button v-else-if="stopping" class="btn-primary mt-4 bg-red-600 cursor-not-allowed">中断中<span class="dot-anim"></span></button>
-            <button v-else @click="$emit('stop')" class="btn-primary mt-4 bg-red-600 hover:bg-red-700">中断任务</button>
+            <button v-if="!status.is_syncing" @click="$emit('start', form)" class="btn-primary mt-4 bg-gray-800 hover:bg-gray-900">▶️ 启动 {{form.mode.toUpperCase()}} 任务</button>
+            <button v-else-if="stopping" class="btn-primary mt-4 bg-red-600 cursor-not-allowed">⏹️ 中断中<span class="dot-anim"></span></button>
+            <button v-else @click="$emit('stop')" class="btn-primary mt-4 bg-red-600 hover:bg-red-700">⛔ 中断任务</button>
         </div>
     `
 };
@@ -112,8 +129,8 @@ const LogViewer = {
     template: `
         <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-2">
             <div class="card">
-                <h2 class="text-lg font-semibold mb-1">系统日志</h2>
-                <p class="text-xs text-gray-500 mb-4">记录系统运行状态及错误信息</p>
+                <h2 class="text-lg font-semibold mb-1">🖥️ 系统日志</h2>
+                <p class="text-xs text-gray-500 mb-4">记录系统运行状态和错误信息。</p>
                 <div class="bg-slate-900 p-3 rounded h-80 overflow-y-auto text-xs font-mono space-y-1">
                     <div v-for="l in sysLogs" :key="l.id" :class="{'text-red-400':l.level==='ERROR','text-yellow-400':l.level==='WARNING','text-green-400':l.level==='SUCCESS','text-gray-300':l.level==='INFO'}" class="border-b border-slate-800 pb-1">
                         <span class="text-slate-500">[{{l.time}}]</span> [{{l.level}}] {{l.msg}}
@@ -121,10 +138,10 @@ const LogViewer = {
                 </div>
             </div>
             <div class="card">
-                <h2 class="text-lg font-semibold mb-1">消息日志</h2>
-                <p class="text-xs text-gray-500 mb-4">记录每条消息的同步状态</p>
+                <h2 class="text-lg font-semibold mb-1">💬 消息日志</h2>
+                <p class="text-xs text-gray-500 mb-4">记录每条消息的同步状态。</p>
                 <div class="bg-slate-900 p-3 rounded h-80 overflow-y-auto text-xs font-mono space-y-1">
-                    <div v-for="l in msgLogs" :key="l.id" :class="{'text-red-400':l.action.includes('DROP')||l.action.includes('ERROR'),'text-green-400':l.action.includes('SEND'),'text-gray-300':l.action.includes('RECV')}" class="border-b border-slate-800 pb-1">
+                    <div v-for="l in msgLogs" :key="l.id" :class="{'text-red-400':l.action.includes('DROP')||l.action.includes('ERROR'),'text-yellow-200':l.action.includes('SKIP'),'text-yellow-300':l.action.includes('WARN')||l.action.includes('FALLBACK'),'text-green-400':l.action.includes('SEND')||l.action.includes('MAP'),'text-gray-300':l.action.includes('RECV')}" class="border-b border-slate-800 pb-1">
                         <span class="text-slate-500">[{{l.time}}]</span> [{{l.action}}] {{l.detail}}
                     </div>
                 </div>
@@ -139,9 +156,11 @@ const app = createApp({
             appInfo: { bot:{}, user:{} }, mappings: [], filterRules: [],
             newFilter: { rule_type: 'replace', pattern: '', replacement: '', is_case_sensitive: 0 },
             settings: { sync_text: '1', sync_photo: '1', sync_video: '1', sync_document: '1', sync_audio: '1', sync_voice: '1', sync_sticker: '1', sync_gif: '1' },
-            syncForm: { mode: 'api', sender: 'bot', source_id: '', target_id: '', start_id: '', end_id: '', json_path: '', delay: 5 },
+            syncForm: { mode: 'api', sender: 'bot', source_id: '', target_id: '', start_id: '', end_id: '', json_path: '', delay: 5, force_send: '0' },
             syncStatus: { is_syncing: false, mode: '', total: 0, current: 0 },
             stopping: false,
+            serverAction: '',
+            restartPolling: null,
             sysLogs: [], msgLogs: [], sseConnection: null
         }
     },
@@ -151,6 +170,19 @@ const app = createApp({
     },
     methods: {
         showToast(msg) { alert(msg); },
+        waitForServerReady() {
+            if (this.restartPolling) clearInterval(this.restartPolling);
+            this.restartPolling = setInterval(async () => {
+                try {
+                    const res = await fetch('/api/app_info', { cache: 'no-store' });
+                    if (!res.ok) return;
+                    clearInterval(this.restartPolling);
+                    this.restartPolling = null;
+                    window.location.reload();
+                } catch (_) {
+                }
+            }, 1000);
+        },
         setupSSE() {
             this.sseConnection = new EventSource('/api/stream');
             this.sseConnection.onmessage = (e) => {
@@ -194,6 +226,23 @@ const app = createApp({
         async stopSync() {
             this.stopping = true;
             await fetch('/api/stop_sync', { method: 'POST' });
+        },
+        async restartServer() {
+            if (this.serverAction) return;
+            if (!confirm('确认重启服务？')) return;
+            this.serverAction = 'restart';
+            const res = await (await fetch('/api/server/restart', { method: 'POST' })).json();
+            this.showToast(res.message);
+            if (this.sseConnection) this.sseConnection.close();
+            this.waitForServerReady();
+        },
+        async stopServer() {
+            if (this.serverAction) return;
+            if (!confirm('确认关闭服务？')) return;
+            this.serverAction = 'stop';
+            const res = await (await fetch('/api/server/stop', { method: 'POST' })).json();
+            this.showToast(res.message);
+            if (this.sseConnection) this.sseConnection.close();
         }
     }
 });

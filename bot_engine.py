@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 import os
 import asyncio
 from dotenv import load_dotenv
@@ -17,45 +17,57 @@ PROXY_PASS = os.getenv("PROXY_PASS", "").strip()
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.types import Message
-from aiogram.exceptions import TelegramRetryAfter
 from pyrogram import Client
 import database as db
-from aiohttp import ClientTimeout
 
 def build_proxy_url():
-    if not PROXY_HOST: return None
+    if not PROXY_HOST:
+        return None
     if PROXY_USER and PROXY_PASS:
         return f"socks5://{PROXY_USER}:{PROXY_PASS}@{PROXY_HOST}:{PROXY_PORT}"
     return f"socks5://{PROXY_HOST}:{PROXY_PORT}"
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-if not BOT_TOKEN: raise ValueError("❌ 错误：未在 .env 中找到 BOT_TOKEN。")
+if not BOT_TOKEN:
+    raise ValueError("未在 .env 中找到 BOT_TOKEN")
 
 proxy_url = build_proxy_url()
-timeout = ClientTimeout(total=3600, connect=60, sock_connect=60)
+timeout = 3600
 session = AiohttpSession(timeout=timeout, proxy=proxy_url)
 aiogram_bot = Bot(token=BOT_TOKEN, session=session)
 dp = Dispatcher()
 media_group_cache = {}
 
-def get_chat_name(chat): return f"@{chat.username}" if chat.username else (chat.title or str(chat.id))
+def get_chat_name(chat):
+    return f"@{chat.username}" if chat.username else (chat.title or str(chat.id))
 
-# ================= 核心：数据驱动解耦 =================
-MSG_TYPES = ['photo', 'video', 'animation', 'audio', 'voice', 'sticker', 'document']
+MSG_TYPES = ["photo", "video", "animation", "audio", "voice", "sticker", "document"]
+
 def get_msg_type(msg: Message) -> str:
-    return next((t for t in MSG_TYPES if getattr(msg, t, None)), 'text')
+    return next((t for t in MSG_TYPES if getattr(msg, t, None)), "text")
 
 async def is_type_allowed(msg_type: str) -> bool:
     settings = await db.get_all_settings()
-    key_map = {t: f'sync_{t}' for t in MSG_TYPES}
-    key_map['animation'] = 'sync_gif'
-    return settings.get(key_map.get(msg_type, 'sync_text'), "1") == "1"
+    key_map = {t: f"sync_{t}" for t in MSG_TYPES}
+    key_map["animation"] = "sync_gif"
+    return settings.get(key_map.get(msg_type, "sync_text"), "1") == "1"
+
+async def resolve_reply_for_forward(source_id: int, current_msg_id: int, reply_source_msg_id: int | None):
+    if not reply_source_msg_id:
+        return None
+    target_reply_id = await db.get_target_msg_id(source_id, reply_source_msg_id)
+    if target_reply_id:
+        await db.add_msg_log("REPLY_MAP", f"源:[{source_id}] 消息ID:{current_msg_id} | 回复目标已映射到:{target_reply_id}")
+    else:
+        await db.add_msg_log("REPLY_FALLBACK", f"源:[{source_id}] 消息ID:{current_msg_id} | 被回复消息:{reply_source_msg_id} 未同步，按普通消息发送")
+    return target_reply_id
 
 @dp.channel_post()
 async def handle_new_post(message: Message):
     source_id = message.chat.id
     target_id = await db.get_target_channel(source_id)
-    if not target_id: return
+    if not target_id:
+        return
 
     chat_name = get_chat_name(message.chat)
     msg_type = get_msg_type(message)
@@ -71,6 +83,7 @@ async def handle_new_post(message: Message):
             await asyncio.sleep(2)
             if mg_id in media_group_cache:
                 group = sorted(media_group_cache.pop(mg_id), key=lambda m: m.message_id)
+                reply_to_id = await resolve_reply_for_forward(source_id, group[0].message_id, getattr(group[0], "reply_to_message_id", None))
                 for m in group:
                     t_html = m.html_text if m.text or m.caption else ""
                     f_name = m.document.file_name if m.document else (m.video.file_name if m.video else "")
@@ -82,24 +95,33 @@ async def handle_new_post(message: Message):
                 msg_ids = [m.message_id for m in group]
                 await db.add_msg_log("RECV_GROUP", f"源: [{chat_name}] 组IDs:{msg_ids} | 接收相册")
                 try:
-                    copied_ids = await aiogram_bot.copy_messages(chat_id=target_id, from_chat_id=source_id, message_ids=msg_ids)
-                    for orig_m, new_m in zip(group, copied_ids): await db.save_msg_mapping(source_id, orig_m.message_id, new_m.message_id)
+                    kwargs = {"chat_id": target_id, "from_chat_id": source_id, "message_ids": msg_ids}
+                    if reply_to_id:
+                        kwargs["reply_to_message_id"] = reply_to_id
+                    copied_ids = await aiogram_bot.copy_messages(**kwargs)
+                    for orig_m, new_m in zip(group, copied_ids):
+                        await db.save_msg_mapping(source_id, orig_m.message_id, new_m.message_id)
                     await db.add_msg_log("SEND_GROUP", f"原始:[{source_id}] 组IDs:{msg_ids} | 目标:[{target_id}] 新组IDs:{copied_ids} | 相册转发成功")
-                except Exception as e:
-                    await db.add_msg_log("WARN", f"相册转发失败，降级单条拆散")
+                except Exception:
+                    await db.add_msg_log("WARN", "相册转发失败，降级单条拆发")
                     for m in group:
                         try:
-                            copied = await aiogram_bot.copy_message(chat_id=target_id, from_chat_id=source_id, message_id=m.message_id)
+                            kwargs = {"chat_id": target_id, "from_chat_id": source_id, "message_id": m.message_id}
+                            if reply_to_id:
+                                kwargs["reply_to_message_id"] = reply_to_id
+                            copied = await aiogram_bot.copy_message(**kwargs)
                             await db.save_msg_mapping(source_id, m.message_id, copied.message_id)
                             await asyncio.sleep(1)
-                        except: pass
-        else: media_group_cache[mg_id].append(message)
+                        except Exception:
+                            pass
+        else:
+            media_group_cache[mg_id].append(message)
         return
 
-    has_media = msg_type != 'text'
-    file_name = getattr(getattr(message, msg_type, None), 'file_name', "") if msg_type in ['document', 'video'] else ""
+    has_media = msg_type != "text"
+    file_name = getattr(getattr(message, msg_type, None), "file_name", "") if msg_type in ["document", "video"] else ""
     text_html = message.html_text if message.text or message.caption else ""
-    
+
     await db.add_msg_log("RECV", f"源: [{chat_name}] ID:{message.message_id} | 类型:{msg_type.upper()}")
 
     should_skip, new_html = await db.apply_message_filters(text_html, has_media, file_name)
@@ -107,15 +129,24 @@ async def handle_new_post(message: Message):
         await db.add_msg_log("DROP_REGEX", f"源: [{chat_name}] ID:{message.message_id} | 被正则或空文本拦截")
         return
 
+    reply_to_id = await resolve_reply_for_forward(source_id, message.message_id, getattr(message, "reply_to_message_id", None))
+
     try:
         if new_html != text_html:
             kwargs = {"chat_id": target_id, "parse_mode": "HTML"}
-            if not has_media: kwargs["text"] = new_html
-            else: kwargs.update({"from_chat_id": source_id, "message_id": message.message_id, "caption": new_html})
+            if not has_media:
+                kwargs["text"] = new_html
+            else:
+                kwargs.update({"from_chat_id": source_id, "message_id": message.message_id, "caption": new_html})
+            if reply_to_id:
+                kwargs["reply_to_message_id"] = reply_to_id
             copied = await (aiogram_bot.send_message(**kwargs) if not has_media else aiogram_bot.copy_message(**kwargs))
         else:
-            copied = await aiogram_bot.copy_message(chat_id=target_id, from_chat_id=source_id, message_id=message.message_id)
-        
+            kwargs = {"chat_id": target_id, "from_chat_id": source_id, "message_id": message.message_id}
+            if reply_to_id:
+                kwargs["reply_to_message_id"] = reply_to_id
+            copied = await aiogram_bot.copy_message(**kwargs)
+
         await db.save_msg_mapping(source_id, message.message_id, copied.message_id)
         await db.add_msg_log("SEND", f"原始:[{source_id}] 消息ID:{message.message_id} | 目标:[{target_id}] 新ID:{copied.message_id} | 转发成功")
     except Exception as e:
@@ -126,20 +157,26 @@ async def handle_edited_post(message: Message):
     source_id, msg_id = message.chat.id, message.message_id
     target_id = await db.get_target_channel(source_id)
     target_msg_id = await db.get_target_msg_id(source_id, msg_id) if target_id else None
-    if not target_msg_id: return
+    if not target_msg_id:
+        return
 
-    has_media = get_msg_type(message) != 'text'
+    has_media = get_msg_type(message) != "text"
     should_skip, new_html = await db.apply_message_filters(message.html_text if message.text or message.caption else "", has_media, "")
-    if should_skip: return 
+    if should_skip:
+        return
 
     try:
         kwargs = {"chat_id": target_id, "message_id": target_msg_id, "parse_mode": "HTML"}
-        if message.text: await aiogram_bot.edit_message_text(text=new_html, **kwargs)
-        else: await aiogram_bot.edit_message_caption(caption=new_html, **kwargs)
+        if message.text:
+            await aiogram_bot.edit_message_text(text=new_html, **kwargs)
+        else:
+            await aiogram_bot.edit_message_caption(caption=new_html, **kwargs)
         await db.add_msg_log("EDIT", f"同步修改 源ID:{msg_id} -> 目标ID:{target_msg_id}")
-    except Exception: pass
+    except Exception:
+        pass
 
 pyro_user_app = None
+
 def init_user_client():
     global pyro_user_app
     if API_ID and API_HASH:
@@ -148,10 +185,7 @@ def init_user_client():
         if PROXY_HOST:
             async def _patched_connect(self, destination):
                 from python_socks.async_.asyncio.v2 import Proxy
-                proxy_url = f"socks5://{PROXY_HOST}:{PROXY_PORT}"
-                if PROXY_USER and PROXY_PASS:
-                    proxy_url = f"socks5://{PROXY_USER}:{PROXY_PASS}@{PROXY_HOST}:{PROXY_PORT}"
-                proxy = Proxy.from_url(proxy_url)
+                proxy = Proxy.from_url(f"socks5://{PROXY_USER}:{PROXY_PASS}@{PROXY_HOST}:{PROXY_PORT}" if PROXY_USER and PROXY_PASS else f"socks5://{PROXY_HOST}:{PROXY_PORT}")
                 sock = await proxy.connect(dest_host=destination[0], dest_port=destination[1])
                 self.reader = sock.reader
                 self.writer = sock.writer
