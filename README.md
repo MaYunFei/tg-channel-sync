@@ -6,10 +6,10 @@
 **ToDo**：下载重传模式可选修改文件哈希；支持话题模式；解决issues🥳
 
 [GitHub 仓库](https://github.com/RRHTY/tg-channel-sync)
+<img width="1200" height="1200" alt="image" src="https://github.com/user-attachments/assets/7d25932c-2cce-4dea-9879-fde967e2fc21" />
+<img width="1200" height="325" alt="image" src="https://github.com/user-attachments/assets/3f8fb204-08d7-44d2-8b65-16e7ae393224" />
+<img width="1464" height="1111" alt="image" src="https://github.com/user-attachments/assets/8056f70f-3d99-4757-b54a-f83eb5e56ee8" />
 
-<img width="1385" height="1315" alt="image" src="https://github.com/user-attachments/assets/0fb63bac-ea06-4ae4-b46a-92d4de27fce1" />
-
-<img width="1194" height="1002" alt="image" src="https://github.com/user-attachments/assets/87c66f35-dde2-4afc-b7df-1534b56d8032" />
 
 -----
 
