@@ -2,9 +2,13 @@ import aiosqlite
 import logging
 import re
 
-DB_FILE = "data.db"
+from app_paths import database_file, ensure_runtime_dirs
+
+
+DB_FILE = str(database_file())
 
 async def init_db():
+    ensure_runtime_dirs()
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute("CREATE TABLE IF NOT EXISTS channel_mappings (id INTEGER PRIMARY KEY AUTOINCREMENT, source_id INTEGER NOT NULL UNIQUE, target_id INTEGER NOT NULL)")
         await db.execute("CREATE TABLE IF NOT EXISTS message_mappings (id INTEGER PRIMARY KEY AUTOINCREMENT, source_channel_id INTEGER NOT NULL, source_msg_id INTEGER NOT NULL, target_msg_id INTEGER NOT NULL, UNIQUE(source_channel_id, source_msg_id))")

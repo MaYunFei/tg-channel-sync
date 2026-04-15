@@ -1,23 +1,28 @@
-# Python 缓存
+﻿# Python cache
 __pycache__/
 *.py[cod]
 *$py.class
 
-# 虚拟环境
+# Virtual environments
 venv/
 .venv/
 env/
 
-# 临时文件
-temp/
-.restart_flag
-
-# 敏感信息 
+# Runtime config
 .env
+config.json
+
+# Runtime data
+/data/
+/temp/
 *.session
 *.session-journal
 *.db
 
-# 编辑器配置
+# Editor settings
 .idea/
 .vscode/
+
+# OS files
+.DS_Store
+Thumbs.db

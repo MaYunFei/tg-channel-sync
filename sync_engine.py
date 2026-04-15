@@ -17,6 +17,7 @@ from pyrogram.types import InputMediaVideo
 
 import bot_engine
 import database as db
+from app_paths import temp_dir
 
 TYPE_MAP = {
     "photo": "sync_photo",
@@ -29,7 +30,7 @@ TYPE_MAP = {
 }
 AIO_MEDIA_CLS = {"photo": AioPhoto, "video": AioVideo, "audio": AioAudio, "document": AioDoc}
 PYRO_MEDIA_CLS = {"photo": InputMediaPhoto, "video": InputMediaVideo, "audio": InputMediaAudio, "document": InputMediaDocument}
-TEMP_DIR = "temp"
+TEMP_DIR = str(temp_dir())
 
 sync_state = {
     "is_syncing": False,

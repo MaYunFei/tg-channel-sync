@@ -1,38 +1,50 @@
 ﻿import asyncio
 import json
-import os
 import shutil
 import signal
 import sys
 from contextlib import asynccontextmanager
 
 import uvicorn
-from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, Form, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 import bot_engine
 import database as db
+from app_config import get_config, get_setup_status, save_config
+from app_paths import ensure_runtime_dirs, static_dir, temp_dir
 from sync_engine import process_master_sync, sync_state
 
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-load_dotenv()
-PORT = int(os.getenv("PORT", 8011))
+STATUS_NOT_CONFIGURED = "未配置"
+STATUS_INITIALIZING = "初始化中"
+STATUS_CONNECTED = "已连接"
+STATUS_LOGGED_IN = "已登录"
+STATUS_LOGIN_REQUIRED = "需要登录"
+STATUS_TIMEOUT = "连接超时"
+STATUS_START_FAILED = "启动失败"
 
 app_info_cache = {
-    "bot": {"name": "", "username": ""},
-    "user": {"name": "", "status": "未配置"},
+    "bot": {"name": "", "username": "", "status": STATUS_NOT_CONFIGURED},
+    "user": {"name": "", "status": STATUS_NOT_CONFIGURED},
 }
 polling_task = None
-TEMP_DIR = "temp"
+TEMP_DIR = str(temp_dir())
 _cleanup_done = False
 SHUTDOWN_EVENT = asyncio.Event()
 SERVER = None
 RESTART_REQUESTED = False
 STOP_REQUESTED = False
+
+
+def refresh_app_info(bot_info=None, user_info=None):
+    if bot_info:
+        app_info_cache["bot"].update(bot_info)
+    if user_info:
+        app_info_cache["user"].update(user_info)
 
 
 async def _force_cleanup():
@@ -48,16 +60,8 @@ async def _force_cleanup():
             pass
         polling_task = None
 
-    if bot_engine.pyro_user_app and bot_engine.pyro_user_app.is_initialized:
-        try:
-            await bot_engine.pyro_user_app.stop()
-        except Exception:
-            pass
-
-    try:
-        await bot_engine.aiogram_bot.session.close()
-    except Exception:
-        pass
+    await bot_engine.close_user_client()
+    await bot_engine.close_bot_client()
 
 
 def _request_server_exit():
@@ -80,28 +84,52 @@ async def lifespan(app: FastAPI):
 
     signal.signal(signal.SIGINT, _sigint_handler)
 
+    ensure_runtime_dirs()
     await db.init_db()
-    if os.path.exists(TEMP_DIR):
-        shutil.rmtree(TEMP_DIR, ignore_errors=True)
-    os.makedirs(TEMP_DIR, exist_ok=True)
+    if temp_dir().exists():
+        shutil.rmtree(temp_dir(), ignore_errors=True)
+    temp_dir().mkdir(parents=True, exist_ok=True)
+
+    config = get_config()
+    telegram = config["telegram"]
+
+    refresh_app_info(
+        {
+            "name": "",
+            "username": "",
+            "status": STATUS_NOT_CONFIGURED if not telegram.get("bot_token") else STATUS_INITIALIZING,
+        },
+        {
+            "name": "",
+            "status": STATUS_NOT_CONFIGURED
+            if not (telegram.get("api_id") and telegram.get("api_hash"))
+            else STATUS_INITIALIZING,
+        },
+    )
 
     try:
-        me = await bot_engine.aiogram_bot.get_me()
-        app_info_cache["bot"] = {"name": me.first_name, "username": me.username}
-        polling_task = asyncio.create_task(bot_engine.dp.start_polling(bot_engine.aiogram_bot))
-    except Exception as e:
-        await db.add_log("ERROR", f"Bot 启动失败: {e}")
+        bot = bot_engine.init_bot_client()
+        if bot:
+            me = await bot.get_me()
+            refresh_app_info({"name": me.first_name, "username": me.username, "status": STATUS_CONNECTED})
+            polling_task = asyncio.create_task(bot_engine.dp.start_polling(bot))
+    except Exception as exc:
+        refresh_app_info({"status": STATUS_START_FAILED})
+        await db.add_sys_log("ERROR", f"Bot 启动失败: {exc}")
 
-    bot_engine.init_user_client()
-    if bot_engine.pyro_user_app:
+    if bot_engine.has_user_api_credentials():
         try:
-            await asyncio.wait_for(bot_engine.pyro_user_app.start(), timeout=30)
-            user_me = await bot_engine.pyro_user_app.get_me()
-            app_info_cache["user"] = {"name": user_me.first_name, "status": "已登录"}
+            user_me = await asyncio.wait_for(bot_engine.start_user_client_if_authorized(), timeout=30)
+            if user_me:
+                refresh_app_info(user_info={"name": user_me.first_name, "status": STATUS_LOGGED_IN})
+            else:
+                refresh_app_info(user_info={"name": "", "status": STATUS_LOGIN_REQUIRED})
         except asyncio.TimeoutError:
-            await db.add_log("WARNING", "辅助账号连接超时，API 模式暂不可用")
-        except Exception as e:
-            await db.add_log("WARNING", f"辅助账号启动失败: {e}")
+            refresh_app_info(user_info={"status": STATUS_TIMEOUT})
+            await db.add_sys_log("WARNING", "辅助账号连接超时，API 模式暂不可用")
+        except Exception as exc:
+            refresh_app_info(user_info={"status": STATUS_START_FAILED})
+            await db.add_sys_log("WARNING", f"辅助账号启动失败: {exc}")
 
     yield
 
@@ -116,17 +144,111 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="TG Channel Sync", lifespan=lifespan)
-app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/static", StaticFiles(directory=str(static_dir())), name="static")
 
 
 @app.get("/")
 async def serve_index():
-    return FileResponse("static/index.html")
+    return FileResponse(str(static_dir() / "index.html"))
+
+
+@app.get("/api/setup/status")
+async def get_setup_state():
+    return get_setup_status(get_config())
+
+
+@app.get("/api/config")
+async def get_runtime_config():
+    return get_config()
+
+
+@app.post("/api/config")
+async def update_runtime_config(request: Request):
+    payload = await request.json()
+    config = save_config(payload)
+    return {"status": "success", "message": "配置已保存", "config": config}
 
 
 @app.get("/api/app_info")
 async def get_app_info():
     return app_info_cache
+
+
+@app.get("/api/user_auth/status")
+async def get_user_auth_status():
+    return bot_engine.get_user_auth_status()
+
+
+@app.post("/api/user_auth/send_code")
+async def send_user_auth_code(request: Request):
+    try:
+        payload = await request.json()
+        result = await bot_engine.begin_user_auth(payload.get("phone_number", ""))
+        if result["status"] == "authorized":
+            user = result["user"]
+            refresh_app_info(user_info={"name": user["name"], "status": STATUS_LOGGED_IN})
+        else:
+            refresh_app_info(user_info={"name": "", "status": "等待验证码"})
+        return result
+    except Exception as exc:
+        return {"status": "error", "message": str(exc)}
+
+
+@app.post("/api/user_auth/sign_in")
+async def sign_in_user_auth(request: Request):
+    try:
+        payload = await request.json()
+        result = await bot_engine.complete_user_auth(payload.get("phone_code", ""))
+        if result["status"] == "authorized":
+            user = result["user"]
+            refresh_app_info(user_info={"name": user["name"], "status": STATUS_LOGGED_IN})
+        elif result["status"] == "password_required":
+            refresh_app_info(user_info={"name": "", "status": "等待两步验证"})
+        return result
+    except Exception as exc:
+        return {"status": "error", "message": str(exc)}
+
+
+@app.post("/api/user_auth/check_password")
+async def check_user_auth_password(request: Request):
+    try:
+        payload = await request.json()
+        result = await bot_engine.complete_user_password(payload.get("password", ""))
+        user = result["user"]
+        refresh_app_info(user_info={"name": user["name"], "status": STATUS_LOGGED_IN})
+        return result
+    except Exception as exc:
+        return {"status": "error", "message": str(exc)}
+
+
+@app.post("/api/user_auth/cancel")
+async def cancel_user_auth():
+    try:
+        result = await bot_engine.cancel_user_auth()
+        refresh_app_info(
+            user_info={
+                "name": "",
+                "status": STATUS_LOGIN_REQUIRED if bot_engine.has_user_api_credentials() else STATUS_NOT_CONFIGURED,
+            }
+        )
+        return result
+    except Exception as exc:
+        return {"status": "error", "message": str(exc)}
+
+
+@app.post("/api/user_auth/switch_account")
+async def switch_user_account():
+    try:
+        result = await bot_engine.switch_user_account()
+        refresh_app_info(
+            user_info={
+                "name": "",
+                "status": STATUS_LOGIN_REQUIRED if bot_engine.has_user_api_credentials() else STATUS_NOT_CONFIGURED,
+            }
+        )
+        return result
+    except Exception as exc:
+        return {"status": "error", "message": str(exc)}
 
 
 @app.get("/api/stream")
@@ -144,23 +266,23 @@ async def sse_stream(request: Request):
             while not SHUTDOWN_EVENT.is_set():
                 if await request.is_disconnected():
                     break
-                payload = {"status": sync_state}
+                payload = {"status": sync_state, "app_info": app_info_cache}
                 new_sys = await db.get_sys_logs_after(last_sys_id)
                 if new_sys:
                     last_sys_id = new_sys[0][0]
                     payload["sys_logs"] = [
-                        {"id": r[0], "time": r[1], "level": r[2], "msg": r[3]}
-                        for r in reversed(new_sys)
+                        {"id": row[0], "time": row[1], "level": row[2], "msg": row[3]}
+                        for row in reversed(new_sys)
                     ]
                 new_msg = await db.get_msg_logs_after(last_msg_id)
                 if new_msg:
                     last_msg_id = new_msg[0][0]
                     payload["msg_logs"] = [
-                        {"id": r[0], "time": r[1], "action": r[2], "detail": r[3]}
-                        for r in reversed(new_msg)
+                        {"id": row[0], "time": row[1], "action": row[2], "detail": row[3]}
+                        for row in reversed(new_msg)
                     ]
 
-                yield f"data: {json.dumps(payload)}\n\n"
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
                 await asyncio.sleep(1)
         except asyncio.CancelledError:
             pass
@@ -203,6 +325,9 @@ async def restart_server():
 
 
 async def resolve_chat_id(chat_ref: str) -> int:
+    if bot_engine.aiogram_bot is None:
+        raise ValueError("BOT 未配置或未连接，无法解析频道")
+
     chat_ref = str(chat_ref).strip()
     if chat_ref.lstrip("-").isdigit():
         return int(chat_ref)
@@ -212,16 +337,13 @@ async def resolve_chat_id(chat_ref: str) -> int:
         chat_ref = "@" + chat_ref
     try:
         return (await bot_engine.aiogram_bot.get_chat(chat_ref)).id
-    except Exception as e:
-        raise ValueError(f"无法解析频道 {chat_ref}: {e}")
+    except Exception as exc:
+        raise ValueError(f"无法解析频道 {chat_ref}: {exc}")
 
 
 @app.get("/api/mappings")
 async def get_mappings():
-    return [
-        {"source_id": m[0], "target_id": m[1]}
-        for m in await db.get_all_channel_mappings()
-    ]
+    return [{"source_id": row[0], "target_id": row[1]} for row in await db.get_all_channel_mappings()]
 
 
 @app.post("/api/mappings")
@@ -232,8 +354,8 @@ async def add_mapping(source_id: str = Form(...), target_id: str = Form(...)):
         await db.add_channel_mapping(src, tgt)
         await db.add_sys_log("INFO", f"添加频道映射: {src} -> {tgt}")
         return {"status": "success", "message": "映射规则添加成功"}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+    except Exception as exc:
+        return {"status": "error", "message": str(exc)}
 
 
 @app.delete("/api/mappings/{source_id}")
@@ -246,13 +368,13 @@ async def delete_mapping(source_id: int):
 async def get_filter_rules():
     return [
         {
-            "id": r[0],
-            "rule_type": r[1],
-            "pattern": r[2],
-            "replacement": r[3],
-            "is_case_sensitive": r[4],
+            "id": row[0],
+            "rule_type": row[1],
+            "pattern": row[2],
+            "replacement": row[3],
+            "is_case_sensitive": row[4],
         }
-        for r in await db.get_all_filter_rules()
+        for row in await db.get_all_filter_rules()
     ]
 
 
@@ -319,9 +441,9 @@ async def start_sync(
     background_tasks: BackgroundTasks,
     mode: str = Form(...),
     sender: str = Form("bot"),
-    source_id: str = Form(...),
-    target_id: str = Form(...),
-    delay: float = Form(...),
+    source_id: str = Form(""),
+    target_id: str = Form(""),
+    delay: float = Form(5),
     start_id: int = Form(0),
     end_id: int = Form(0),
     json_path: str = Form(""),
@@ -329,8 +451,10 @@ async def start_sync(
 ):
     if sync_state["is_syncing"]:
         return {"status": "error", "message": "任务正在运行中"}
+    if bot_engine.aiogram_bot is None:
+        return {"status": "error", "message": "请先在设置中配置并重启 BOT"}
     if mode in ["api", "clone"] and not bot_engine.pyro_user_app:
-        return {"status": "error", "message": "请先配置 API 辅助账号"}
+        return {"status": "error", "message": "请先完成辅助账号登录"}
 
     background_tasks.add_task(
         process_master_sync,
@@ -356,8 +480,15 @@ def run_server():
     global SERVER, _cleanup_done
     SHUTDOWN_EVENT.clear()
     _cleanup_done = False
-    config = uvicorn.Config(app, host="0.0.0.0", port=PORT, timeout_keep_alive=0)
-    SERVER = uvicorn.Server(config)
+    config = get_config()
+    server_cfg = config["server"]
+    uvicorn_config = uvicorn.Config(
+        app,
+        host=server_cfg.get("host", "127.0.0.1"),
+        port=int(server_cfg.get("port", 8011)),
+        timeout_keep_alive=0,
+    )
+    SERVER = uvicorn.Server(uvicorn_config)
     SERVER.run()
     SERVER = None
 

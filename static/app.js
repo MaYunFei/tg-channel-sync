@@ -1,254 +1,100 @@
 ﻿const { createApp } = Vue;
+const HELP_LINK = "https://github.com/RRHTY/tg-channel-sync/issues/2";
+
+const BotApiHint = {
+  template: `<p class="text-xs text-gray-500 mt-1">可选。自行搭建 BOT API 可突破机器人上传 50M 限制，参考 <a :href="helpLink" target="_blank" class="text-blue-600 hover:underline">#2</a></p>`,
+  data(){ return { helpLink: HELP_LINK }; }
+};
+
+const SetupWizard = {
+  props:["config","saving"], components:{ BotApiHint },
+  template:`<div class="card max-w-3xl mx-auto"><h2 class="text-xl font-semibold mb-2">初始化向导</h2><p class="text-sm text-gray-500 mb-6">填写基础配置后即可开始使用，配置会保存到程序目录下的 config.json。</p><div class="space-y-6"><section><h3 class="text-sm font-bold text-gray-800 mb-3">Bot 配置</h3><div class="space-y-3"><input v-model="config.telegram.bot_token" type="text" placeholder="BOT_TOKEN（必填）" class="input-box"><div><input v-model="config.telegram.bot_api_base_url" type="text" placeholder="BOT_API_BASE_URL（可选，例如 http://127.0.0.1:8081）" class="input-box"><bot-api-hint></bot-api-hint></div></div></section><section><h3 class="text-sm font-bold text-gray-800 mb-3">高级配置</h3><p class="text-xs text-gray-500 mb-3">仅在使用 API 复制、下载重传等模式时需要。</p><div class="grid grid-cols-1 md:grid-cols-2 gap-3"><input v-model="config.telegram.api_id" type="number" placeholder="API_ID" class="input-box"><input v-model="config.telegram.api_hash" type="text" placeholder="API_HASH" class="input-box"></div></section><section><h3 class="text-sm font-bold text-gray-800 mb-3">代理配置</h3><label class="flex items-center text-sm mb-3"><input v-model="config.proxy.enabled" type="checkbox" class="mr-2">启用代理</label><div class="grid grid-cols-1 md:grid-cols-2 gap-3" :class="{ 'opacity-50': !config.proxy.enabled }"><input v-model="config.proxy.host" type="text" placeholder="HOST" class="input-box"><input v-model="config.proxy.port" type="number" placeholder="PORT" class="input-box"><input v-model="config.proxy.username" type="text" placeholder="USERNAME" class="input-box"><input v-model="config.proxy.password" type="password" placeholder="PASSWORD" class="input-box"></div></section></div><div class="mt-6 flex flex-col gap-3 md:flex-row"><button @click="$emit('save', true)" :disabled="saving" class="btn-primary">保存并重启</button><button @click="$emit('save', false)" :disabled="saving" class="btn-secondary">仅保存配置</button></div></div>`
+};
+
+const StatusOverview = {
+  props:["appInfo","status"],
+  methods:{ tone(v){ if(["已连接","已登录","运行中"].includes(v)) return "border-green-200 bg-green-50 text-green-700"; if(["初始化中","连接超时","等待验证码","等待两步验证","需要登录"].includes(v)) return "border-amber-200 bg-amber-50 text-amber-700"; if(["启动失败","未配置"].includes(v)) return "border-red-200 bg-red-50 text-red-700"; return "border-blue-200 bg-blue-50 text-blue-700"; } },
+  template:`<div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 mb-6"><div class="card compact-card border" :class="tone(appInfo.bot.status)"><div class="text-xs uppercase tracking-wide opacity-70">Bot</div><div class="text-lg font-semibold mt-2">{{ appInfo.bot.status || '未配置' }}</div><div class="text-xs mt-1">{{ appInfo.bot.name || '未连接' }}</div></div><div class="card compact-card border" :class="tone(appInfo.user.status)"><div class="text-xs uppercase tracking-wide opacity-70">辅助账号</div><div class="text-lg font-semibold mt-2">{{ appInfo.user.status === '需要登录' ? '未登录' : (appInfo.user.status || '未配置') }}</div><div v-if="appInfo.user.status === '需要登录'" class="text-xs mt-1 leading-5"><button @click="$emit('open-settings')" class="text-blue-700 hover:underline">前往设置</button> 页面登录</div><div v-else class="text-xs mt-1">{{ appInfo.user.name || '未登录' }}</div></div><div class="card compact-card border" :class="tone(status.is_syncing ? '运行中' : '空闲')"><div class="text-xs uppercase tracking-wide opacity-70">任务状态</div><div class="text-lg font-semibold mt-2">{{ status.is_syncing ? '运行中' : '空闲' }}</div><div class="text-xs mt-1">{{ status.mode || '等待任务' }}</div></div><div class="card compact-card border border-slate-200 bg-slate-50 text-slate-700"><div class="text-xs uppercase tracking-wide opacity-70">进度</div><div class="text-lg font-semibold mt-2">{{ status.current || 0 }} / {{ status.total || 0 }}</div><div class="text-xs mt-1">跳过 {{ status.skipped || 0 }}</div></div></div>`
+};
 
 const ChannelMapping = {
-    props: ['mappings'],
-    data() { return { source: '', target: '' } },
-    template: `
-        <div class="card">
-            <h2 class="text-lg font-semibold mb-1">🔗 频道映射</h2>
-            <p class="text-xs text-gray-500 mb-4">实时同步源频道消息到目标频道，支持多组映射。</p>
-            <div class="space-y-3">
-                <div class="flex gap-2">
-                    <input v-model="source" type="text" placeholder="源频道ID/URL" class="input-box">
-                    <input v-model="target" type="text" placeholder="目标频道ID/URL" class="input-box">
-                </div>
-                <button @click="$emit('add', source, target); source=''; target='';" class="btn-primary">💾 保存规则</button>
-            </div>
-            <ul class="mt-4 space-y-2 text-sm">
-                <li v-for="map in mappings" :key="map.source_id" class="flex justify-between p-2 bg-gray-50 rounded group">
-                    <div class="flex-1 flex justify-between px-2 font-mono"><span>{{ map.source_id }}</span><span class="text-gray-400">→</span><span>{{ map.target_id }}</span></div>
-                    <button @click="$emit('del', map.source_id)" class="text-red-500 opacity-0 group-hover:opacity-100 px-2">🗑️ 删除</button>
-                </li>
-            </ul>
-        </div>
-    `
+  props:["mappings"], data(){ return { source:"", target:"" }; },
+  template:`<div class="card"><h2 class="text-lg font-semibold mb-1">频道映射</h2><p class="text-xs text-gray-500 mb-4">实时同步源频道消息到目标频道，支持多组映射。</p><div class="space-y-3"><div class="flex gap-2"><input v-model="source" type="text" placeholder="源频道 ID / URL" class="input-box"><input v-model="target" type="text" placeholder="目标频道 ID / URL" class="input-box"></div><button @click="$emit('add', source, target); source=''; target='';" class="btn-primary">保存规则</button></div><ul class="mt-4 space-y-2 text-sm"><li v-for="map in mappings" :key="map.source_id" class="flex justify-between p-2 bg-gray-50 rounded group"><div class="flex-1 flex justify-between px-2 font-mono"><span>{{ map.source_id }}</span><span class="text-gray-400">→</span><span>{{ map.target_id }}</span></div><button @click="$emit('del', map.source_id)" class="text-red-500 opacity-0 group-hover:opacity-100 px-2">删除</button></li></ul></div>`
 };
-
-const GlobalFilters = {
-    props: ['settings', 'rules', 'newRule'],
-    data() {
-        return {
-            typeLabels: {'sync_text':'📝 文本','sync_photo':'🖼️ 图片','sync_video':'🎬 视频','sync_document':'📄 文件','sync_audio':'🎵 音频','sync_voice':'🎙️ 语音','sync_sticker':'🏷️ 贴纸','sync_gif':'🎞️ 动图'}
-        }
-    },
-    template: `
-        <div class="card">
-            <h2 class="text-lg font-semibold mb-1">🧰 全局过滤</h2>
-            <p class="text-xs text-gray-500 mb-4">控制同步消息类型和内容过滤规则。</p>
-            <div class="bg-white p-4 rounded-lg mb-6 border border-gray-200 shadow-sm">
-                <h3 class="text-sm font-bold text-gray-800 mb-4">🧩 消息类型</h3>
-                <div class="grid grid-cols-4 gap-y-4 gap-x-2 mb-5">
-                    <label v-for="(label, key) in typeLabels" class="flex items-center text-sm cursor-pointer hover:text-blue-600">
-                        <input type="checkbox" v-model="settings[key]" true-value="1" false-value="0" class="mr-1.5 w-4 h-4"> {{ label }}
-                    </label>
-                </div>
-                <button @click="$emit('save-settings', settings)" class="btn-primary">💾 保存类型配置</button>
-            </div>
-
-            <div class="bg-white p-4 rounded-lg border border-gray-200 shadow-sm">
-                <h3 class="text-sm font-bold text-gray-800 mb-4">🪄 正则过滤</h3>
-                <div class="space-y-3 mb-5">
-                    <select v-model="newRule.rule_type" class="input-box bg-white">
-                        <option value="replace">仅替换文本（命中后替换内容）</option>
-                        <option value="drop">屏蔽整条消息（命中后丢弃整条，含媒体）</option>
-                    </select>
-                    <input v-model="newRule.pattern" type="text" placeholder="正则表达式，如：广告.*推广" class="input-box font-mono">
-                    <input v-if="newRule.rule_type === 'replace'" v-model="newRule.replacement" type="text" placeholder="替换为（留空则删除匹配文本）" class="input-box">
-                    <label class="flex items-center text-sm"><input type="checkbox" v-model="newRule.is_case_sensitive" :true-value="1" :false-value="0" class="mr-2">区分大小写</label>
-                    <button @click="$emit('add-rule', newRule)" class="btn-primary">➕ 添加规则</button>
-                </div>
-                <ul class="space-y-2 text-sm border-t pt-4">
-                    <li v-for="r in rules" :key="r.id" class="flex justify-between p-2 bg-gray-50 rounded group">
-                        <span class="truncate font-mono">{{ r.pattern }} <span v-if="r.rule_type==='replace'" class="text-green-600">→ {{r.replacement||'(删除)'}}</span></span>
-                        <button @click="$emit('del-rule', r.id)" class="text-red-500 opacity-0 group-hover:opacity-100">🗑️ 删除</button>
-                    </li>
-                </ul>
-            </div>
-        </div>
-    `
-};
-
 const SyncPanel = {
-    props: ['status', 'form', 'stopping'],
-    template: `
-        <div class="card">
-            <h2 class="text-lg font-semibold mb-1">🕘 历史同步</h2>
-            <p class="text-xs text-gray-500 mb-4">批量同步指定 ID 范围内的历史消息到目标频道。</p>
-            <div v-if="status.is_syncing" class="mb-6 p-4 bg-white rounded shadow-sm">
-                <div class="flex justify-between text-sm mb-1"><span class="font-medium text-blue-700">⏳ 运行中 {{status.mode}}</span><span>{{status.current}} / {{status.total}}</span></div>
-                <div class="w-full bg-gray-200 rounded-full h-2 mb-3"><div class="bg-blue-600 h-2 rounded-full transition-all" :style="{width: (status.total>0?status.current/status.total*100:0)+'%'}"></div></div>
-                <div class="text-xs text-gray-500"><p>跳过: {{status.skipped}}</p><p class="truncate text-blue-500 font-bold mt-1">{{status.current_text}}</p></div>
-            </div>
-            <div class="space-y-4" :class="{'opacity-50 pointer-events-none': status.is_syncing}">
-                <div v-if="form.mode!=='json'" class="flex gap-2"><input v-model="form.source_id" placeholder="源频道ID/URL" class="input-box"><input v-model="form.target_id" placeholder="目标频道ID/URL" class="input-box"></div>
-                <div v-else class="space-y-2">
-                    <input v-model="form.target_id" placeholder="目标频道ID/URL" class="input-box">
-                    <input v-model="form.json_path" placeholder="JSON文件路径（如 C:/Users/PC/Downloads/AyuGram Desktop/ChatExport_2026-04-14/result.json）" class="input-box font-mono text-sm">
-                </div>
-                <div class="flex bg-white rounded-lg border p-1">
-                    <button @click="form.mode='json'" :class="form.mode==='json'?'bg-blue-100 text-blue-700 font-semibold':'text-gray-500'" class="flex-1 py-1 text-sm rounded">JSON导入</button>
-                    <button @click="form.mode='api'" :class="form.mode==='api'?'bg-purple-100 text-purple-700 font-semibold':'text-gray-500'" class="flex-1 py-1 text-sm rounded">API复制</button>
-                    <button @click="form.mode='clone'" :class="form.mode==='clone'?'bg-emerald-100 text-emerald-700 font-semibold':'text-gray-500'" class="flex-1 py-1 text-sm rounded">下载重传</button>
-                </div>
-                <div class="text-xs text-gray-500 -mt-2 px-1 space-y-1">
-                    <template v-if="form.mode==='json'">
-                        <p>📁 根据导出目录中的 <code>result.json</code> 和同目录媒体文件自动发送到目标频道。</p>
-                        <p class="text-amber-600">⚠️ 提示：当前不支持从 JSON 原样还原媒体组；检测到贴纸时会按图片模式发送，建议勾选贴纸过滤。</p>
-                    </template>
-                    <template v-else-if="form.mode==='api'">
-                        <p>⚡ 通过 API 直接复制消息，速度更快。</p>
-                    </template>
-                    <template v-else-if="form.mode==='clone'">
-                        <p>📦 通过 API 下载后重新上传，适合需要重新编码或避开直拷限制的场景。</p>
-                    </template>
-                </div>
-                <div v-if="form.mode==='clone'" class="bg-white p-3 rounded border text-sm">
-                    <b>👤 发送身份</b>
-                    <label><input type="radio" v-model="form.sender" value="bot" class="ml-2 mr-1">机器人</label>
-                    <label><input type="radio" v-model="form.sender" value="user" class="ml-4 mr-1">辅助账号</label>
-                </div>
-                <div v-if="form.mode==='api'||form.mode==='clone'" class="flex gap-2"><input v-model="form.start_id" type="number" placeholder="起始ID" class="input-box"><input v-model="form.end_id" type="number" placeholder="结束ID" class="input-box"></div>
-                <div><label class="text-xs">单条处理延时(秒): <span class="text-gray-400">最少 0.5</span></label><input v-model="form.delay" type="number" step="0.5" min="0.5" class="input-box"></div>
-                <label class="flex items-start gap-2 text-sm bg-amber-50 border border-amber-200 rounded p-3">
-                    <input type="checkbox" v-model="form.force_send" true-value="1" false-value="0" class="mt-0.5">
-                    <span>
-                        <b>🚨 强制发送</b>
-                        <span class="block text-xs text-gray-600">🚀 跳过重复和断点检查，直接发送当前选中消息。</span>
-                    </span>
-                </label>
-            </div>
-            <button v-if="!status.is_syncing" @click="$emit('start', form)" class="btn-primary mt-4 bg-gray-800 hover:bg-gray-900">▶️ 启动 {{form.mode.toUpperCase()}} 任务</button>
-            <button v-else-if="stopping" class="btn-primary mt-4 bg-red-600 cursor-not-allowed">⏹️ 中断中<span class="dot-anim"></span></button>
-            <button v-else @click="$emit('stop')" class="btn-primary mt-4 bg-red-600 hover:bg-red-700">⛔ 中断任务</button>
-        </div>
-    `
+  props:["status","form","stopping"],
+  template:`<div class="card"><h2 class="text-lg font-semibold mb-1">历史同步</h2><p class="text-xs text-gray-500 mb-4">批量同步指定范围内的历史消息到目标频道。</p><div v-if="status.is_syncing" class="mb-6 p-4 bg-white rounded shadow-sm"><div class="flex justify-between text-sm mb-1"><span class="font-medium text-blue-700">运行中 · {{ status.mode }}</span><span>{{ status.current }} / {{ status.total }}</span></div><div class="w-full bg-gray-200 rounded-full h-2 mb-3"><div class="bg-blue-600 h-2 rounded-full transition-all" :style="{ width: (status.total > 0 ? status.current / status.total * 100 : 0) + '%' }"></div></div><div class="text-xs text-gray-500"><p>跳过: {{ status.skipped }}</p><p class="truncate text-blue-500 font-bold mt-1">{{ status.current_text }}</p></div></div><div class="space-y-4" :class="{ 'opacity-50 pointer-events-none': status.is_syncing }"><div v-if="form.mode !== 'json'" class="flex gap-2"><input v-model="form.source_id" placeholder="源频道 ID / URL" class="input-box"><input v-model="form.target_id" placeholder="目标频道 ID / URL" class="input-box"></div><div v-else class="space-y-2"><input v-model="form.target_id" placeholder="目标频道 ID / URL" class="input-box"><input v-model="form.json_path" placeholder="JSON 文件路径" class="input-box font-mono text-sm"></div><div class="flex bg-white rounded-lg border p-1"><button @click="form.mode='json'" :class="form.mode === 'json' ? 'bg-blue-100 text-blue-700 font-semibold' : 'text-gray-500'" class="flex-1 py-1 text-sm rounded">JSON 导入</button><button @click="form.mode='api'" :class="form.mode === 'api' ? 'bg-purple-100 text-purple-700 font-semibold' : 'text-gray-500'" class="flex-1 py-1 text-sm rounded">API 复制</button><button @click="form.mode='clone'" :class="form.mode === 'clone' ? 'bg-emerald-100 text-emerald-700 font-semibold' : 'text-gray-500'" class="flex-1 py-1 text-sm rounded">下载重传</button></div><div class="text-xs text-gray-500 -mt-2 px-1 space-y-1"><p v-if="form.mode === 'json'">根据导出目录中的 result.json 和同目录媒体文件自动发送到目标频道。</p><p v-else-if="form.mode === 'api'">通过 API 直接复制消息，速度更快。</p><p v-else-if="form.mode === 'clone'">通过 API 下载后重新上传，适合需要重新上传的场景。</p></div><div v-if="form.mode === 'clone'" class="bg-white p-3 rounded border text-sm"><b>发送身份</b><label><input type="radio" v-model="form.sender" value="bot" class="ml-2 mr-1">机器人</label><label><input type="radio" v-model="form.sender" value="user" class="ml-4 mr-1">辅助账号</label></div><div v-if="form.mode === 'api' || form.mode === 'clone'" class="flex gap-2"><input v-model="form.start_id" type="number" placeholder="起始 ID" class="input-box"><input v-model="form.end_id" type="number" placeholder="结束 ID" class="input-box"></div><div><label class="text-xs">单条处理延时（秒）<span class="text-gray-400">，最小 0.5</span></label><input v-model="form.delay" type="number" step="0.5" min="0.5" class="input-box"></div><label class="flex items-start gap-2 text-sm bg-amber-50 border border-amber-200 rounded p-3"><input type="checkbox" v-model="form.force_send" true-value="1" false-value="0" class="mt-0.5"><span><b>强制发送</b><span class="block text-xs text-gray-600">跳过重复和断点检查，直接发送当前选中的消息。</span></span></label></div><button v-if="!status.is_syncing" @click="$emit('start', form)" class="btn-primary mt-4 bg-gray-800 hover:bg-gray-900">启动 {{ form.mode.toUpperCase() }} 任务</button><button v-else-if="stopping" class="btn-primary mt-4 bg-red-600 cursor-not-allowed">中断中<span class="dot-anim"></span></button><button v-else @click="$emit('stop')" class="btn-primary mt-4 bg-red-600 hover:bg-red-700">中断任务</button></div>`
 };
 
 const LogViewer = {
-    props: ['sysLogs', 'msgLogs'],
-    template: `
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-2">
-            <div class="card">
-                <h2 class="text-lg font-semibold mb-1">🖥️ 系统日志</h2>
-                <p class="text-xs text-gray-500 mb-4">记录系统运行状态和错误信息。</p>
-                <div class="bg-slate-900 p-3 rounded h-80 overflow-y-auto text-xs font-mono space-y-1">
-                    <div v-for="l in sysLogs" :key="l.id" :class="{'text-red-400':l.level==='ERROR','text-yellow-400':l.level==='WARNING','text-green-400':l.level==='SUCCESS','text-gray-300':l.level==='INFO'}" class="border-b border-slate-800 pb-1">
-                        <span class="text-slate-500">[{{l.time}}]</span> [{{l.level}}] {{l.msg}}
-                    </div>
-                </div>
-            </div>
-            <div class="card">
-                <h2 class="text-lg font-semibold mb-1">💬 消息日志</h2>
-                <p class="text-xs text-gray-500 mb-4">记录每条消息的同步状态。</p>
-                <div class="bg-slate-900 p-3 rounded h-80 overflow-y-auto text-xs font-mono space-y-1">
-                    <div v-for="l in msgLogs" :key="l.id" :class="{'text-red-400':l.action.includes('DROP')||l.action.includes('ERROR'),'text-yellow-200':l.action.includes('SKIP'),'text-yellow-300':l.action.includes('WARN')||l.action.includes('FALLBACK'),'text-green-400':l.action.includes('SEND')||l.action.includes('MAP'),'text-gray-300':l.action.includes('RECV')}" class="border-b border-slate-800 pb-1">
-                        <span class="text-slate-500">[{{l.time}}]</span> [{{l.action}}] {{l.detail}}
-                    </div>
-                </div>
-            </div>
-        </div>
-    `
+  props:["sysLogs","msgLogs"],
+  template:`<div class="grid grid-cols-1 xl:grid-cols-2 gap-6"><div class="card"><h2 class="text-lg font-semibold mb-1">系统日志</h2><p class="text-xs text-gray-500 mb-4">记录系统运行状态和错误信息。</p><div class="bg-slate-900 p-3 rounded h-64 overflow-y-auto text-xs font-mono space-y-1"><div v-for="log in sysLogs" :key="log.id" :class="{ 'text-red-400': log.level === 'ERROR', 'text-yellow-400': log.level === 'WARNING', 'text-green-400': log.level === 'SUCCESS', 'text-gray-300': log.level === 'INFO' }" class="border-b border-slate-800 pb-1"><span class="text-slate-500">[{{ log.time }}]</span> [{{ log.level }}] {{ log.msg }}</div></div></div><div class="card"><h2 class="text-lg font-semibold mb-1">消息日志</h2><p class="text-xs text-gray-500 mb-4">记录每条消息的同步状态。</p><div class="bg-slate-900 p-3 rounded h-64 overflow-y-auto text-xs font-mono space-y-1"><div v-for="log in msgLogs" :key="log.id" :class="{ 'text-red-400': log.action.includes('DROP') || log.action.includes('ERROR'), 'text-yellow-200': log.action.includes('SKIP'), 'text-yellow-300': log.action.includes('WARN') || log.action.includes('FALLBACK'), 'text-green-400': log.action.includes('SEND') || log.action.includes('MAP'), 'text-gray-300': log.action.includes('RECV') }" class="border-b border-slate-800 pb-1"><span class="text-slate-500">[{{ log.time }}]</span> [{{ log.action }}] {{ log.detail }}</div></div></div></div>`
 };
 
-const app = createApp({
-    data() {
-        return {
-            appInfo: { bot:{}, user:{} }, mappings: [], filterRules: [],
-            newFilter: { rule_type: 'replace', pattern: '', replacement: '', is_case_sensitive: 0 },
-            settings: { sync_text: '1', sync_photo: '1', sync_video: '1', sync_document: '1', sync_audio: '1', sync_voice: '1', sync_sticker: '1', sync_gif: '1' },
-            syncForm: { mode: 'api', sender: 'bot', source_id: '', target_id: '', start_id: '', end_id: '', json_path: '', delay: 5, force_send: '0' },
-            syncStatus: { is_syncing: false, mode: '', total: 0, current: 0 },
-            stopping: false,
-            serverAction: '',
-            restartPolling: null,
-            sysLogs: [], msgLogs: [], sseConnection: null
-        }
-    },
-    mounted() {
-        this.fetchAppInfo(); this.loadMappings(); this.loadFilters(); this.loadSettings();
-        this.setupSSE();
-    },
-    methods: {
-        showToast(msg) { alert(msg); },
-        waitForServerReady() {
-            if (this.restartPolling) clearInterval(this.restartPolling);
-            this.restartPolling = setInterval(async () => {
-                try {
-                    const res = await fetch('/api/app_info', { cache: 'no-store' });
-                    if (!res.ok) return;
-                    clearInterval(this.restartPolling);
-                    this.restartPolling = null;
-                    window.location.reload();
-                } catch (_) {
-                }
-            }, 1000);
-        },
-        setupSSE() {
-            this.sseConnection = new EventSource('/api/stream');
-            this.sseConnection.onmessage = (e) => {
-                const data = JSON.parse(e.data);
-                if (data.status) {
-                    if (this.stopping && !data.status.is_syncing) {
-                        this.stopping = false;
-                    }
-                    this.syncStatus = data.status;
-                }
-                if(data.sys_logs) this.sysLogs = [...data.sys_logs, ...this.sysLogs].slice(0, 200);
-                if(data.msg_logs) this.msgLogs = [...data.msg_logs, ...this.msgLogs].slice(0, 200);
-            };
-        },
-        async fetchAppInfo() { this.appInfo = await (await fetch('/api/app_info')).json(); },
-        async loadMappings() { this.mappings = await (await fetch('/api/mappings')).json(); },
-        async loadFilters() { this.filterRules = await (await fetch('/api/filter_rules')).json(); },
-        async loadSettings() { const r = await (await fetch('/api/global_settings')).json(); Object.keys(this.settings).forEach(k => {if(r[k]!==undefined) this.settings[k]=r[k]}); },
-        async saveSettings(silent = false) {
-            const fd = new FormData(); Object.keys(this.settings).forEach(k => fd.append(k, this.settings[k]));
-            const res = await (await fetch('/api/global_settings', { method: 'POST', body: fd })).json();
-            if (!silent) this.showToast(res.message);
-        },
-        async addMapping(s, t) {
-            const fd = new FormData(); fd.append('source_id', s); fd.append('target_id', t);
-            await fetch('/api/mappings', { method: 'POST', body: fd }); this.loadMappings();
-        },
-        async deleteMapping(id) { await fetch(`/api/mappings/${id}`, { method: 'DELETE' }); this.loadMappings(); },
-        async addFilter(rule) {
-            const fd = new FormData(); Object.keys(rule).forEach(k => fd.append(k, rule[k]));
-            await fetch('/api/filter_rules', { method: 'POST', body: fd }); this.loadFilters();
-            this.newFilter = { rule_type: 'replace', pattern: '', replacement: '', is_case_sensitive: 0 };
-        },
-        async deleteFilter(id) { await fetch(`/api/filter_rules/${id}`, { method: 'DELETE' }); this.loadFilters(); },
-        async startSync(form) {
-            await this.saveSettings(true);
-            const fd = new FormData(); Object.keys(form).forEach(k => fd.append(k, form[k]||(k.includes('id')?'0':'')));
-            const res = await (await fetch('/api/start_sync', { method: 'POST', body: fd })).json();
-            if (res.status === 'error') this.showToast(res.message);
-        },
-        async stopSync() {
-            this.stopping = true;
-            await fetch('/api/stop_sync', { method: 'POST' });
-        },
-        async restartServer() {
-            if (this.serverAction) return;
-            if (!confirm('确认重启服务？')) return;
-            this.serverAction = 'restart';
-            const res = await (await fetch('/api/server/restart', { method: 'POST' })).json();
-            this.showToast(res.message);
-            if (this.sseConnection) this.sseConnection.close();
-            this.waitForServerReady();
-        },
-        async stopServer() {
-            if (this.serverAction) return;
-            if (!confirm('确认关闭服务？')) return;
-            this.serverAction = 'stop';
-            const res = await (await fetch('/api/server/stop', { method: 'POST' })).json();
-            this.showToast(res.message);
-            if (this.sseConnection) this.sseConnection.close();
-        }
-    }
-});
+const GlobalFilters = {
+  props:["settings","rules","newRule"],
+  data(){ return { typeLabels:{ sync_text:"📝 文本", sync_photo:"🖼️ 图片", sync_video:"🎞️ 视频", sync_document:"📎 文件", sync_audio:"🎵 音频", sync_voice:"🎙️ 语音", sync_sticker:"🏷️ 贴纸", sync_gif:"🎪 动图" } }; },
+  template:`<div class="space-y-6"><div class="card"><h2 class="text-lg font-semibold mb-1">🧰 类型过滤</h2><p class="text-xs text-gray-500 mb-4">控制哪些类型的消息允许同步。</p><div class="grid grid-cols-2 md:grid-cols-4 gap-y-4 gap-x-2 mb-5"><label v-for="(label, key) in typeLabels" class="flex items-center text-sm cursor-pointer hover:text-blue-600"><input type="checkbox" v-model="settings[key]" true-value="1" false-value="0" class="mr-1.5 w-4 h-4"> {{ label }}</label></div><button @click="$emit('save-settings', settings)" class="btn-primary">保存类型配置</button></div><div class="card"><h2 class="text-lg font-semibold mb-1">🪄 正则过滤</h2><p class="text-xs text-gray-500 mb-4">控制内容替换和整条消息拦截规则。</p><div class="space-y-3 mb-5"><select v-model="newRule.rule_type" class="input-box bg-white"><option value="replace">🔁 仅替换文本</option><option value="drop">⛔ 屏蔽整条消息</option></select><input v-model="newRule.pattern" type="text" placeholder="正则表达式" class="input-box font-mono"><input v-if="newRule.rule_type === 'replace'" v-model="newRule.replacement" type="text" placeholder="替换为（留空则删除匹配文本）" class="input-box"><label class="flex items-center text-sm"><input type="checkbox" v-model="newRule.is_case_sensitive" :true-value="1" :false-value="0" class="mr-2">区分大小写</label><button @click="$emit('add-rule', newRule)" class="btn-primary">添加规则</button></div><ul class="space-y-2 text-sm border-t pt-4"><li v-for="rule in rules" :key="rule.id" class="flex justify-between p-2 bg-gray-50 rounded group"><span class="truncate font-mono">{{ rule.pattern }} <span v-if="rule.rule_type === 'replace'" class="text-green-600">→ {{ rule.replacement || '(删除)' }}</span></span><button @click="$emit('del-rule', rule.id)" class="text-red-500 opacity-0 group-hover:opacity-100">删除</button></li></ul></div></div>`
+};
+const UserAuthPanel = {
+  props:["auth","submitting","cooldown"],
+  data(){ return { phoneNumber:"", phoneCode:"", password:"" }; },
+  watch:{ auth:{ immediate:true, handler(v){ if(v && v.phone_number) this.phoneNumber = v.phone_number; } } },
+  template:`<div class="card"><h2 class="text-lg font-semibold mb-1">辅助账号登录</h2><p class="text-xs text-gray-500 mb-4">首次登录辅助账号时，在这里完成手机号、验证码和两步验证密码输入。</p><div class="bg-slate-50 border border-slate-200 rounded p-3 text-sm mb-4"><div><b>当前状态：</b>{{ auth.status_label || '未登录' }}</div><div v-if="auth.phone_number" class="text-xs text-gray-500 mt-1">手机号：{{ auth.phone_number }}</div><div v-if="auth.password_hint" class="text-xs text-amber-700 mt-1">密码提示：{{ auth.password_hint }}</div></div><div class="space-y-3"><div class="flex flex-col gap-3 md:flex-row"><input v-model="phoneNumber" type="text" placeholder="手机号，例如 +8613712345678" class="input-box"><button @click="$emit('send-code', phoneNumber)" :disabled="submitting || cooldown > 0" class="btn-primary md:w-auto md:min-w-[140px]">{{ cooldown > 0 ? (cooldown + 's 后重试') : '发送验证码' }}</button></div><div v-if="auth.status === 'authorized'" class="flex justify-end"><button @click="$emit('switch-account')" :disabled="submitting" class="btn-secondary md:w-auto">切换账号</button></div><div v-if="auth.awaiting_code" class="space-y-3 border-t pt-4"><input v-model="phoneCode" type="text" placeholder="输入验证码" class="input-box"><div class="flex gap-3"><button @click="$emit('verify-code', phoneCode)" :disabled="submitting" class="btn-primary">提交验证码</button><button @click="$emit('cancel-auth')" :disabled="submitting" class="btn-secondary">取消</button></div></div><div v-if="auth.awaiting_password" class="space-y-3 border-t pt-4"><input v-model="password" type="password" placeholder="输入两步验证密码" class="input-box"><div class="flex gap-3"><button @click="$emit('submit-password', password)" :disabled="submitting" class="btn-primary">提交密码</button><button @click="$emit('cancel-auth')" :disabled="submitting" class="btn-secondary">取消</button></div></div></div></div>`
+};
 
-app.component('channel-mapping', ChannelMapping);
-app.component('global-filters', GlobalFilters);
-app.component('sync-panel', SyncPanel);
-app.component('log-viewer', LogViewer);
-app.mount('#app');
+const SettingsPanel = {
+  props:["config","saving","userAuth","authSubmitting","sendCodeCooldown"], components:{ BotApiHint, UserAuthPanel },
+  template:`<div class="space-y-6"><div class="card"><h2 class="text-lg font-semibold mb-1">设置</h2><p class="text-xs text-gray-500 mb-4">编辑 config.json，并在需要时重启服务使配置生效。</p><div class="grid grid-cols-1 lg:grid-cols-2 gap-6"><section class="space-y-3"><h3 class="text-sm font-bold text-gray-800">Telegram 配置</h3><input v-model="config.telegram.bot_token" type="text" placeholder="BOT_TOKEN" class="input-box"><div><input v-model="config.telegram.bot_api_base_url" type="text" placeholder="BOT_API_BASE_URL（可选）" class="input-box"><bot-api-hint></bot-api-hint></div><input v-model="config.telegram.api_id" type="number" placeholder="API_ID" class="input-box"><input v-model="config.telegram.api_hash" type="text" placeholder="API_HASH" class="input-box"></section><section class="space-y-3"><h3 class="text-sm font-bold text-gray-800">代理与程序配置</h3><label class="flex items-center text-sm"><input v-model="config.proxy.enabled" type="checkbox" class="mr-2">启用代理</label><div class="grid grid-cols-2 gap-3"><input v-model="config.proxy.host" type="text" placeholder="HOST" class="input-box"><input v-model="config.proxy.port" type="number" placeholder="PORT" class="input-box"><input v-model="config.proxy.username" type="text" placeholder="USERNAME" class="input-box"><input v-model="config.proxy.password" type="password" placeholder="PASSWORD" class="input-box"></div><input v-model="config.server.port" type="number" placeholder="服务端口" class="input-box"><input v-model="config.sync.default_delay" type="number" step="0.5" min="0.5" placeholder="默认延时" class="input-box"><label class="flex items-center text-sm"><input v-model="config.sync.force_send" type="checkbox" class="mr-2">默认强制发送</label></section></div><div class="mt-6 flex flex-col gap-3 md:flex-row"><button @click="$emit('save-config', false)" :disabled="saving" class="btn-primary">保存设置</button><button @click="$emit('save-restart')" :disabled="saving" class="btn-secondary">保存并重启</button></div></div><user-auth-panel :auth="userAuth" :submitting="authSubmitting" :cooldown="sendCodeCooldown" @send-code="$emit('send-code', $event)" @verify-code="$emit('verify-code', $event)" @submit-password="$emit('submit-password', $event)" @cancel-auth="$emit('cancel-auth')" @switch-account="$emit('switch-account')"></user-auth-panel></div>`
+};
+
+createApp({
+  components:{ SetupWizard, StatusOverview, ChannelMapping, SyncPanel, LogViewer, SettingsPanel, GlobalFilters },
+  data(){ return { currentView:"home", appInfo:{ bot:{}, user:{} }, mappings:[], filterRules:[], newFilter:{ rule_type:"replace", pattern:"", replacement:"", is_case_sensitive:0 }, settings:{ sync_text:"1", sync_photo:"1", sync_video:"1", sync_document:"1", sync_audio:"1", sync_voice:"1", sync_sticker:"1", sync_gif:"1" }, configForm:{ telegram:{ bot_token:"", api_id:"", api_hash:"", bot_api_base_url:"" }, proxy:{ enabled:false, host:"127.0.0.1", port:7897, username:"", password:"" }, server:{ host:"127.0.0.1", port:8011, auto_open_browser:false }, sync:{ default_delay:5, force_send:false }, app:{ portable_mode:true, log_level:"INFO" } }, setupStatus:{ needs_setup:false }, syncForm:{ mode:"api", sender:"bot", source_id:"", target_id:"", start_id:"", end_id:"", json_path:"", delay:5, force_send:"0" }, syncStatus:{ is_syncing:false, mode:"", total:0, current:0, skipped:0 }, userAuth:{ status:"idle", status_label:"未登录", awaiting_code:false, awaiting_password:false, phone_number:"", password_hint:"", send_code_cooldown:0 }, sendCodeCooldown:0, sendCodeTimer:null, authSubmitting:false, stopping:false, serverAction:"", restartPolling:null, sysLogs:[], msgLogs:[], sseConnection:null, configSaving:false, notice:{ message:"", type:"info" }, noticeTimer:null }; },
+  async mounted(){ await this.bootstrap(); this.setupSSE(); this.startSendCodeTimer(); },
+  methods:{
+    async bootstrap(){ await Promise.all([this.loadConfig(), this.loadSetupStatus(), this.fetchAppInfo(), this.loadMappings(), this.loadFilters(), this.loadSettings(), this.loadUserAuthStatus()]); this.syncForm.delay = this.configForm.sync.default_delay || 5; this.syncForm.force_send = this.configForm.sync.force_send ? "1" : "0"; this.currentView = this.setupStatus.needs_setup ? "setup" : "home"; },
+    navButtonClass(view){ return this.currentView === view ? "bg-gray-900 text-white" : "bg-gray-100 text-gray-700 hover:bg-gray-200"; },
+    showToast(msg, type = "info"){ if(!msg) return; this.notice = { message: msg, type }; if(this.noticeTimer) clearTimeout(this.noticeTimer); this.noticeTimer = setTimeout(() => { this.notice = { message: "", type: "info" }; this.noticeTimer = null; }, 4000); }, openSettings(){ this.currentView = "settings"; },
+    normalizeConfigForm(){ if(!this.configForm.telegram.api_id) this.configForm.telegram.api_id = ""; },
+    updateUserAuthLabel(){ const map={ idle:"未登录", awaiting_code:"等待验证码", awaiting_password:"等待两步验证", authorized:"已登录" }; this.userAuth.status_label = map[this.userAuth.status] || this.userAuth.status || "未登录"; this.sendCodeCooldown = Math.max(this.sendCodeCooldown || 0, this.userAuth.send_code_cooldown || 0); },
+    startSendCodeTimer(){ if(this.sendCodeTimer) clearInterval(this.sendCodeTimer); this.sendCodeTimer = setInterval(() => { if(this.sendCodeCooldown > 0) this.sendCodeCooldown -= 1; }, 1000); },
+    async loadSetupStatus(){ this.setupStatus = await (await fetch("/api/setup/status")).json(); },
+    async loadConfig(){ this.configForm = await (await fetch("/api/config")).json(); this.normalizeConfigForm(); },
+    async loadUserAuthStatus(){ this.userAuth = await (await fetch("/api/user_auth/status")).json(); this.sendCodeCooldown = this.userAuth.send_code_cooldown || 0; this.updateUserAuthLabel(); },
+    async saveConfig(showToast = true){ this.configSaving = true; try { const payload = JSON.parse(JSON.stringify(this.configForm)); payload.telegram.api_id = payload.telegram.api_id ? Number(payload.telegram.api_id) : 0; const res = await (await fetch("/api/config", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(payload) })).json(); if(showToast) this.showToast(res.message); this.configForm = res.config; this.normalizeConfigForm(); await this.loadSetupStatus(); await this.loadUserAuthStatus(); return res; } finally { this.configSaving = false; } },
+    async saveSetup(shouldRestart){ if(!this.configForm.telegram.bot_token){ this.showToast("BOT_TOKEN 为必填项"); return; } await this.saveConfig(!shouldRestart); this.currentView = "home"; if(shouldRestart) await this.restartServer(); },
+    async saveSettingsPage(shouldRestart){ await this.saveConfig(true); if(shouldRestart) await this.restartServer(); }, async saveAndRestart(){ await this.saveConfig(false); await this.restartServer(); },
+    waitForServerReady(){ if(this.restartPolling) clearInterval(this.restartPolling); this.restartPolling = setInterval(async()=>{ try { const res = await fetch("/api/app_info", { cache:"no-store" }); if(!res.ok) return; clearInterval(this.restartPolling); this.restartPolling = null; window.location.reload(); } catch(_){} }, 1000); },
+    setupSSE(){ this.sseConnection = new EventSource("/api/stream"); this.sseConnection.onmessage = (event)=>{ const data = JSON.parse(event.data); if(data.status){ if(this.stopping && !data.status.is_syncing) this.stopping = false; this.syncStatus = data.status; } if(data.app_info) this.appInfo = data.app_info; if(data.sys_logs) this.sysLogs = [...data.sys_logs, ...this.sysLogs].slice(0, 200); if(data.msg_logs) this.msgLogs = [...data.msg_logs, ...this.msgLogs].slice(0, 200); }; },
+    async fetchAppInfo(){ this.appInfo = await (await fetch("/api/app_info")).json(); },
+    async loadMappings(){ this.mappings = await (await fetch("/api/mappings")).json(); },
+    async loadFilters(){ this.filterRules = await (await fetch("/api/filter_rules")).json(); },
+    async loadSettings(){ const result = await (await fetch("/api/global_settings")).json(); Object.keys(this.settings).forEach((key)=>{ if(result[key] !== undefined) this.settings[key] = result[key]; }); },
+    async saveGlobalSettings(){ const form = new FormData(); Object.keys(this.settings).forEach((key)=>form.append(key, this.settings[key])); const res = await (await fetch("/api/global_settings", { method:"POST", body:form })).json(); this.showToast(res.message); },
+    async addMapping(source, target){ const form = new FormData(); form.append("source_id", source); form.append("target_id", target); const res = await (await fetch("/api/mappings", { method:"POST", body:form })).json(); if(res.message) this.showToast(res.message); this.loadMappings(); },
+    async deleteMapping(id){ await fetch(`/api/mappings/${id}`, { method:"DELETE" }); this.loadMappings(); },
+    async addFilter(rule){ const form = new FormData(); Object.keys(rule).forEach((key)=>form.append(key, rule[key])); const res = await (await fetch("/api/filter_rules", { method:"POST", body:form })).json(); if(res.message) this.showToast(res.message); this.loadFilters(); this.newFilter = { rule_type:"replace", pattern:"", replacement:"", is_case_sensitive:0 }; },
+    async deleteFilter(id){ await fetch(`/api/filter_rules/${id}`, { method:"DELETE" }); this.loadFilters(); },
+    async startSync(form){ const payload = new FormData(); Object.keys(form).forEach((key)=>payload.append(key, form[key] || (key.includes("id") ? "0" : ""))); const res = await (await fetch("/api/start_sync", { method:"POST", body:payload })).json(); if(res.message) this.showToast(res.message); },
+    async stopSync(){ this.stopping = true; await fetch("/api/stop_sync", { method:"POST" }); },
+    async restartServer(){ if(this.serverAction) return; if(!window.confirm("确认重启服务吗？")) return; this.serverAction = "restart"; const res = await (await fetch("/api/server/restart", { method:"POST" })).json(); this.showToast(res.message); if(this.sseConnection) this.sseConnection.close(); this.waitForServerReady(); },
+    async stopServer(){ if(this.serverAction) return; if(!window.confirm("确认关闭服务吗？")) return; this.serverAction = "stop"; const res = await (await fetch("/api/server/stop", { method:"POST" })).json(); this.showToast(res.message); if(this.sseConnection) this.sseConnection.close(); },
+    async sendUserCode(phoneNumber){ if(this.sendCodeCooldown > 0) return; this.authSubmitting = true; try { const res = await (await fetch("/api/user_auth/send_code", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify({ phone_number: phoneNumber }) })).json(); this.showToast(res.message || "已发送请求", res.status === "error" ? "error" : "info"); if(res.send_code_cooldown){ this.sendCodeCooldown = res.send_code_cooldown; } await this.loadUserAuthStatus(); await this.fetchAppInfo(); } finally { this.authSubmitting = false; } },
+    async verifyUserCode(phoneCode){ this.authSubmitting = true; try { const res = await (await fetch("/api/user_auth/sign_in", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify({ phone_code: phoneCode }) })).json(); this.showToast(res.message || "已提交验证码", res.status === "error" ? "error" : "info"); await this.loadUserAuthStatus(); await this.fetchAppInfo(); } finally { this.authSubmitting = false; } },
+    async submitUserPassword(password){ this.authSubmitting = true; try { const res = await (await fetch("/api/user_auth/check_password", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify({ password }) })).json(); this.showToast(res.message || "已提交密码", res.status === "error" ? "error" : "info"); await this.loadUserAuthStatus(); await this.fetchAppInfo(); } finally { this.authSubmitting = false; } },
+    async cancelUserAuth(){ this.authSubmitting = true; try { const res = await (await fetch("/api/user_auth/cancel", { method:"POST" })).json(); this.showToast(res.message || "已取消登录", res.status === "error" ? "error" : "info"); await this.loadUserAuthStatus(); await this.fetchAppInfo(); } finally { this.authSubmitting = false; } },
+    async switchUserAccount(){
+      if (!window.confirm("确认切换辅助账号吗？\n当前账号会退出登录，并清除本地会话。")) return;
+      this.authSubmitting = true;
+      try {
+        const res = await (await fetch("/api/user_auth/switch_account", { method:"POST" })).json();
+        this.showToast(res.message || "已切换账号", res.status === "error" ? "error" : "info");
+        await this.loadUserAuthStatus();
+        await this.fetchAppInfo();
+      } finally {
+        this.authSubmitting = false;
+      }
+    }
+  }
+}).mount("#app");
