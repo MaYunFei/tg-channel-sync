@@ -2,9 +2,6 @@
 
 一款基于 Web UI 管理的 Telegram 频道同步、复制、数据迁移工具。采用 FastAPI + Vue3 前后端分离架构，支持频道实时监听、多模式历史数据爬取、断点续传以及基于正则表达式的高级内容过滤。
 
-
-**ToDo**：下载重传模式可选修改文件哈希；支持话题模式；解决issues🥳
-
 [GitHub 仓库](https://github.com/RRHTY/tg-channel-sync)
 <img width="1200" height="1200" alt="image" src="https://github.com/user-attachments/assets/7d25932c-2cce-4dea-9879-fde967e2fc21" />
 <img width="1200" height="325" alt="image" src="https://github.com/user-attachments/assets/3f8fb204-08d7-44d2-8b65-16e7ae393224" />
@@ -13,11 +10,11 @@
 
 -----
 
-## 核心特性
+## 特性
 
 1. **双模式运行**：仅 Bot Token 即可运行实时同步功能，配置 TG API 后解锁全部历史迁移能力
 2. **三种历史同步模式**：
-   - **JSON 导入：读取 Telegram 官方导出的json本地数据备份并上传
+   - **JSON 导入**：读取 Telegram 官方导出的json本地数据备份并上传
    - **API 转发**：通过 API 无引用转发到目标频道，速度快
    - **下载重传**：下载媒体后重新上传，彻底去除转发特征
 3. **实时频道映射**：配置源频道与目标频道的对应关系，新消息自动同步
@@ -33,7 +30,7 @@
 
 ### 环境要求
 
-  - **Python 3.9 \~ 3.11** \> ⚠️ **注意**：请勿使用 Python 3.14 及以上版本。底层依赖的加解密库 `tgcrypto` 包含 C 扩展，过高的 Python 版本暂无兼容的预编译包，会导致构建失败。
+  - **Python 3.9 \~ 3.11** \> ⚠️ **注意**：请勿使用 Python 3.13 及以上版本。底层依赖的加解密库 `tgcrypto` 包含 C 扩展，过高的 Python 版本暂无兼容的预编译包，会导致构建失败。
 
 ### 安装步骤
 
@@ -52,25 +49,15 @@
 
 3.  环境变量配置：
 
+   重命名`.env.example`为`.env`
+
     ```bash
     cp .env.example .env
     ```
 
-    编辑 `.env` 文件，填入所需凭证：
+    编辑 `.env` 文件，填入所需凭证，可填入代理配置
 
-    ```ini
-    # [可选] Telegram API 凭据，用于激活 User 引擎 (API拉取/克隆模式必需)
-    API_ID=12345678
-    API_HASH=your_api_hash_here
-
-    # [必填] 机器人 Token
-    BOT_TOKEN=123456789:ABCDefgh...
-
-    # [可选] Web 面板运行端口，默认 8011
-    PORT=8011
-    ```
-
-4.  启动服务：
+5.  启动服务：
 
     ```bash
     python main.py
@@ -80,6 +67,11 @@
     *(注：若配置了 API\_ID，首次启动需在命令行终端完成辅助账号的登录验证)*
 
 -----
+## ToDo
+- [ ]下载重传模式可选修改文件哈希
+- [ ]支持话题模式
+- [ ]打包为程序
+- [ ]还有什么要干的吗？
 
 ## 常见问题 (FAQ)
 
