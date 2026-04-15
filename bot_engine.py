@@ -13,9 +13,11 @@ PROXY_HOST = os.getenv("PROXY_HOST", "").strip()
 PROXY_PORT = int(os.getenv("PROXY_PORT", "7897").strip() or 7897)
 PROXY_USER = os.getenv("PROXY_USER", "").strip()
 PROXY_PASS = os.getenv("PROXY_PASS", "").strip()
+BOT_API_BASE_URL = os.getenv("BOT_API_BASE_URL", "").strip()
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.client.telegram import TelegramAPIServer
 from aiogram.types import Message
 from pyrogram import Client
 import database as db
@@ -33,7 +35,10 @@ if not BOT_TOKEN:
 
 proxy_url = build_proxy_url()
 timeout = 3600
-session = AiohttpSession(timeout=timeout, proxy=proxy_url)
+session_kwargs = {"timeout": timeout, "proxy": proxy_url}
+if BOT_API_BASE_URL:
+    session_kwargs["api"] = TelegramAPIServer.from_base(BOT_API_BASE_URL)
+session = AiohttpSession(**session_kwargs)
 aiogram_bot = Bot(token=BOT_TOKEN, session=session)
 dp = Dispatcher()
 media_group_cache = {}
