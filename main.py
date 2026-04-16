@@ -1,5 +1,4 @@
 ﻿import asyncio
-import importlib.util
 import json
 import shutil
 import signal
@@ -50,10 +49,6 @@ def refresh_app_info(bot_info=None, user_info=None):
         app_info_cache["user"].update(user_info)
 
 
-def has_tgcrypto_acceleration() -> bool:
-    return importlib.util.find_spec("tgcrypto") is not None
-
-
 async def _force_cleanup():
     global polling_task
     SHUTDOWN_EVENT.set()
@@ -93,10 +88,6 @@ async def lifespan(app: FastAPI):
 
     ensure_runtime_dirs()
     await db.init_db()
-    if has_tgcrypto_acceleration():
-        await db.add_sys_log("INFO", "检测到 TgCrypto 加速库，Pyrofork 将使用加密加速")
-    else:
-        await db.add_sys_log("WARNING", "未检测到 TgCrypto 加速库，大文件传输速度可能较慢")
     if temp_dir().exists():
         shutil.rmtree(temp_dir(), ignore_errors=True)
     temp_dir().mkdir(parents=True, exist_ok=True)
