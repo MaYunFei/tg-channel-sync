@@ -25,7 +25,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "server": {
         "host": "127.0.0.1",
         "port": 8011,
-        "auto_open_browser": False,
+        "auto_open_browser": True,
     },
     "sync": {
         "default_delay": 5,

@@ -19,6 +19,11 @@ config.json
 *.session-journal
 *.db
 
+# Build artifacts
+/build/
+/dist/
+/dist-portable/
+
 # Editor settings
 .idea/
 .vscode/

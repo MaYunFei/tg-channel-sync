@@ -10,8 +10,16 @@ def app_root() -> Path:
     return Path(__file__).resolve().parent
 
 
+def bundle_root() -> Path:
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", "")
+        if meipass:
+            return Path(meipass).resolve()
+    return app_root()
+
+
 def static_dir() -> Path:
-    return app_root() / "static"
+    return bundle_root() / "static"
 
 
 def config_file() -> Path:
@@ -19,7 +27,7 @@ def config_file() -> Path:
 
 
 def version_file() -> Path:
-    return app_root() / "VERSION"
+    return bundle_root() / "VERSION"
 
 
 def data_dir() -> Path:
