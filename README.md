@@ -3,7 +3,7 @@
 一个面向 Telegram 频道同步和历史迁移的 Web 工具。
 支持实时同步、JSON 导入、API 转发、下载重传，适合做频道搬运、备份恢复和多频道复制。
 
-[GitHub 仓库](https://github.com/RRHTY/tg-channel-sync)
+[GitHub 仓库](https://github.com/RRHTY/tg-channel-sync)  | [Release](https://github.com/RRHTY/tg-channel-sync/releases)
 
 频道内容
 
@@ -38,11 +38,15 @@ Web页面
 
 ## 部署与运行
 
-### 环境要求
+ Windows x64系统推荐直接下载Release中已构建完毕的full版本，无需Python环境： [Release](https://github.com/RRHTY/tg-channel-sync/releases)
+
+-----
+
+### 运行环境要求
 
   - **Python 3.10+**
 
-### 安装步骤
+### 运行步骤
 
 1.  克隆代码仓库并进入目录：
 
@@ -70,7 +74,7 @@ Web页面
     - **API ID / Hash**: 推荐提供，用于解锁历史迁移与大文件传输能力。
     - *(注：若配置了 API ID，首次启动需在 WebUI 控制台面板中完成辅助账号的登录验证)*
 
-### Windows 便携版
+### 如何构建Windows 便携版
 
 如果你希望发布或自用 Windows 便携版，当前仓库已经提供了 `PyInstaller` 打包文件和 PowerShell 构建脚本。
 
