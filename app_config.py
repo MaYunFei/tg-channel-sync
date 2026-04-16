@@ -10,6 +10,7 @@ from app_paths import config_file, ensure_runtime_dirs
 DEFAULT_CONFIG: dict[str, Any] = {
     "telegram": {
         "bot_token": "",
+        "extra_bot_tokens": [],
         "api_id": 0,
         "api_hash": "",
         "bot_api_base_url": "",
@@ -29,6 +30,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "sync": {
         "default_delay": 5,
         "force_send": False,
+        "prefer_local_bot_api": True,
+        "bot_upload_max_mb": 50,
+        "bot_rate_limit_enabled": False,
+        "bot_rate_limit_gb": 10,
+        "bot_rate_limit_window_hours": 24,
+        "bot_rate_limit_cooldown_minutes": 300,
     },
     "app": {
         "portable_mode": True,
@@ -58,6 +65,14 @@ def _normalize_config(config: dict[str, Any]) -> dict[str, Any]:
     telegram["api_hash"] = str(telegram.get("api_hash", "") or "").strip()
     telegram["bot_token"] = str(telegram.get("bot_token", "") or "").strip()
     telegram["bot_api_base_url"] = str(telegram.get("bot_api_base_url", "") or "").strip()
+    extra_bot_tokens = telegram.get("extra_bot_tokens", [])
+    if isinstance(extra_bot_tokens, str):
+        extra_bot_tokens = [token.strip() for token in extra_bot_tokens.replace(",", "\n").splitlines() if token.strip()]
+    elif isinstance(extra_bot_tokens, list):
+        extra_bot_tokens = [str(token or "").strip() for token in extra_bot_tokens if str(token or "").strip()]
+    else:
+        extra_bot_tokens = []
+    telegram["extra_bot_tokens"] = extra_bot_tokens
 
     proxy["enabled"] = bool(proxy.get("enabled", False))
     proxy["host"] = str(proxy.get("host", "") or "").strip()
@@ -71,6 +86,12 @@ def _normalize_config(config: dict[str, Any]) -> dict[str, Any]:
 
     sync["default_delay"] = max(0.5, float(sync.get("default_delay", 5) or 5))
     sync["force_send"] = bool(sync.get("force_send", False))
+    sync["prefer_local_bot_api"] = bool(sync.get("prefer_local_bot_api", True))
+    sync["bot_upload_max_mb"] = max(1.0, float(sync.get("bot_upload_max_mb", 50) or 50))
+    sync["bot_rate_limit_enabled"] = bool(sync.get("bot_rate_limit_enabled", False))
+    sync["bot_rate_limit_gb"] = max(0.1, float(sync.get("bot_rate_limit_gb", 10) or 10))
+    sync["bot_rate_limit_window_hours"] = max(1.0, float(sync.get("bot_rate_limit_window_hours", 24) or 24))
+    sync["bot_rate_limit_cooldown_minutes"] = max(1.0, float(sync.get("bot_rate_limit_cooldown_minutes", 300) or 300))
     return merged
 
 

@@ -1,8 +1,10 @@
 ﻿import asyncio
+import importlib.util
 import json
 import shutil
 import signal
 import sys
+import urllib.request
 from contextlib import asynccontextmanager
 
 import uvicorn
@@ -13,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 import bot_engine
 import database as db
 from app_config import get_config, get_setup_status, save_config
-from app_paths import ensure_runtime_dirs, static_dir, temp_dir
+from app_paths import ensure_runtime_dirs, static_dir, temp_dir, version_file
 from sync_engine import process_master_sync, sync_state
 
 if sys.platform == "win32":
@@ -38,6 +40,7 @@ SHUTDOWN_EVENT = asyncio.Event()
 SERVER = None
 RESTART_REQUESTED = False
 STOP_REQUESTED = False
+GITHUB_REPO = "RRHTY/tg-channel-sync"
 
 
 def refresh_app_info(bot_info=None, user_info=None):
@@ -45,6 +48,10 @@ def refresh_app_info(bot_info=None, user_info=None):
         app_info_cache["bot"].update(bot_info)
     if user_info:
         app_info_cache["user"].update(user_info)
+
+
+def has_tgcrypto_acceleration() -> bool:
+    return importlib.util.find_spec("tgcrypto") is not None
 
 
 async def _force_cleanup():
@@ -86,6 +93,10 @@ async def lifespan(app: FastAPI):
 
     ensure_runtime_dirs()
     await db.init_db()
+    if has_tgcrypto_acceleration():
+        await db.add_sys_log("INFO", "检测到 TgCrypto 加速库，Pyrofork 将使用加密加速")
+    else:
+        await db.add_sys_log("WARNING", "未检测到 TgCrypto 加速库，大文件传输速度可能较慢")
     if temp_dir().exists():
         shutil.rmtree(temp_dir(), ignore_errors=True)
     temp_dir().mkdir(parents=True, exist_ok=True)
@@ -172,6 +183,127 @@ async def update_runtime_config(request: Request):
 @app.get("/api/app_info")
 async def get_app_info():
     return app_info_cache
+
+
+def _normalize_version_tag(value: str) -> str:
+    return str(value or "").strip().lower().lstrip("v")
+
+
+def _version_key(value: str):
+    normalized = _normalize_version_tag(value)
+    parts = []
+    for chunk in normalized.replace("-", ".").split("."):
+        if not chunk:
+            continue
+        if chunk.isdigit():
+            parts.append((0, int(chunk)))
+            continue
+        number_prefix = ""
+        for ch in chunk:
+            if ch.isdigit():
+                number_prefix += ch
+            else:
+                break
+        if number_prefix:
+            parts.append((0, int(number_prefix)))
+            suffix = chunk[len(number_prefix):]
+            if suffix:
+                parts.append((1, suffix))
+        else:
+            parts.append((1, chunk))
+    return tuple(parts)
+
+
+def _has_valid_version(value: str) -> bool:
+    normalized = _normalize_version_tag(value)
+    if not normalized:
+        return False
+    first = normalized.split(".", 1)[0].split("-", 1)[0]
+    return first.isdigit()
+
+
+def _is_version_at_least(current_version: str, latest_version: str) -> bool:
+    if not latest_version or not _has_valid_version(current_version) or not _has_valid_version(latest_version):
+        return False
+    return _version_key(current_version) >= _version_key(latest_version)
+
+
+def _get_local_version() -> str:
+    try:
+        version = version_file().read_text(encoding="utf-8").strip()
+        if version:
+            return version
+    except Exception:
+        pass
+    return "unknown"
+
+
+def _fetch_github_json(url: str):
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "tg-channel-sync-version-check",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _get_remote_version_info() -> dict:
+    latest_release_url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+    tags_url = f"https://api.github.com/repos/{GITHUB_REPO}/tags?per_page=1"
+    try:
+        release = _fetch_github_json(latest_release_url)
+        tag_name = str(release.get("tag_name") or "").strip()
+        if tag_name:
+            return {
+                "latest_version": tag_name,
+                "source": "release",
+                "url": release.get("html_url") or f"https://github.com/{GITHUB_REPO}/releases/latest",
+            }
+    except Exception:
+        pass
+
+    tags = _fetch_github_json(tags_url)
+    if isinstance(tags, list) and tags:
+        tag_name = str(tags[0].get("name") or "").strip()
+        if tag_name:
+            return {
+                "latest_version": tag_name,
+                "source": "tag",
+                "url": f"https://github.com/{GITHUB_REPO}/tags",
+            }
+
+    return {"latest_version": "", "source": "", "url": f"https://github.com/{GITHUB_REPO}"}
+
+
+@app.get("/api/version")
+async def get_version_info():
+    current_version = _get_local_version()
+    try:
+        remote = await asyncio.to_thread(_get_remote_version_info)
+        latest_version = remote.get("latest_version", "")
+        return {
+            "status": "success",
+            "repo": GITHUB_REPO,
+            "current_version": current_version,
+            "latest_version": latest_version,
+            "source": remote.get("source", ""),
+            "url": remote.get("url", f"https://github.com/{GITHUB_REPO}"),
+            "up_to_date": _is_version_at_least(current_version, latest_version),
+        }
+    except Exception as exc:
+        return {
+            "status": "error",
+            "repo": GITHUB_REPO,
+            "current_version": current_version,
+            "latest_version": "",
+            "source": "",
+            "url": f"https://github.com/{GITHUB_REPO}",
+            "up_to_date": False,
+            "message": str(exc),
+        }
 
 
 @app.get("/api/user_auth/status")

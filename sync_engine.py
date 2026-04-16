@@ -99,7 +99,7 @@ async def dynamic_send(client, msg_type, chat_id, file_ref, caption, parse_mode,
     if msg_type != "sticker":
         kwargs["parse_mode"] = parse_mode
     if quote_data and reply_to_message_id:
-        if client == bot_engine.aiogram_bot:
+        if bot_engine.is_bot_client(client):
             kwargs["reply_parameters"] = ReplyParameters(
                 message_id=reply_to_message_id,
                 quote=quote_data["text"],
@@ -120,6 +120,16 @@ async def dynamic_send(client, msg_type, chat_id, file_ref, caption, parse_mode,
     else:
         kwargs["text"] = caption
     return await method(**kwargs)
+
+
+async def resolve_clone_upload_target(sender, app, file_sizes):
+    total_size = sum(file_sizes)
+    if sender != "bot":
+        return {"sender": "user", "client": app, "parse_mode": ParseMode.HTML, "label": "辅助账号", "bytes": total_size}
+    if not bot_engine.should_upload_via_bot(max(file_sizes) if file_sizes else 0):
+        return {"sender": "user", "client": app, "parse_mode": ParseMode.HTML, "label": "辅助账号", "bytes": total_size}
+    selection = await bot_engine.acquire_upload_bot(total_size)
+    return {"sender": "bot", "client": selection["client"], "parse_mode": "HTML", "label": selection["label"], "bytes": total_size}
 
 
 async def safe_execute(coro):
@@ -284,24 +294,44 @@ async def sync_single_message(mode, sender, app, bot, source_id, target_id, msg,
                 if not file_path or sync_state["stop_requested"]:
                     return
 
-                actual_sender = "user" if (sender == "bot" and os.path.getsize(file_path) > 50 * 1024 * 1024) else sender
-                client = bot if actual_sender == "bot" else app
-                parse_mode = "HTML" if actual_sender == "bot" else ParseMode.HTML
+                file_size = os.path.getsize(file_path)
+                upload_target = await safe_execute(resolve_clone_upload_target(sender, app, [file_size]))
+                actual_sender = upload_target["sender"]
+                client = upload_target["client"]
+                parse_mode = upload_target["parse_mode"]
                 sent_id = None
 
                 for _ in range(3):
                     if sync_state["stop_requested"]:
                         break
                     try:
-                        sync_state["current_text"] = "上传中..."
+                        sync_state["current_text"] = f"上传中... [{upload_target['label']}]"
                         media_arg = FSInputFile(file_path) if actual_sender == "bot" else file_path
                         sent = await safe_execute(dynamic_send(client, msg_type, target_id, media_arg, new_html, parse_mode, reply_to_message_id=reply_to_id, quote_data=quote_data if reply_to_id else None))
                         sent_id = sent.message_id if actual_sender == "bot" else sent.id
+                        if actual_sender == "bot":
+                            await bot_engine.note_upload_success(client, file_size)
                         break
                     except Exception as e:
                         if "STOP_REQUESTED" in str(e):
                             raise e
                         await asyncio.sleep(2)
+
+                if sent_id is None and sender == "bot" and actual_sender == "bot":
+                    await db.add_msg_log("BOT_FALLBACK", f"原始:[{source_id}] 消息ID:{msg.id} | {upload_target['label']} 上传失败，回退辅助账号重传")
+                    for _ in range(3):
+                        if sync_state["stop_requested"]:
+                            break
+                        try:
+                            sync_state["current_text"] = "上传中... [辅助账号回退]"
+                            sent = await safe_execute(dynamic_send(app, msg_type, target_id, file_path, new_html, ParseMode.HTML, reply_to_message_id=reply_to_id, quote_data=quote_data if reply_to_id else None))
+                            sent_id = sent.id
+                            actual_sender = "user"
+                            break
+                        except Exception as e:
+                            if "STOP_REQUESTED" in str(e):
+                                raise e
+                            await asyncio.sleep(2)
 
                 try:
                     os.remove(file_path)
@@ -388,16 +418,19 @@ async def sync_media_group(mode, sender, app, bot, source_id, target_id, group, 
                     pass
             return
 
-        actual_sender = "user" if (sender == "bot" and any(os.path.getsize(path) > 50 * 1024 * 1024 for _, path in downloaded_files)) else sender
+        file_sizes = [os.path.getsize(path) for _, path in downloaded_files]
+        upload_target = await safe_execute(resolve_clone_upload_target(sender, app, file_sizes))
+        actual_sender = upload_target["sender"]
         cls_map = AIO_MEDIA_CLS if actual_sender == "bot" else PYRO_MEDIA_CLS
-        client = bot if actual_sender == "bot" else app
-        parse_mode = "HTML" if actual_sender == "bot" else ParseMode.HTML
+        client = upload_target["client"]
+        parse_mode = upload_target["parse_mode"]
 
+        sent_group_success = False
         for _ in range(3):
             if sync_state["stop_requested"]:
                 break
             try:
-                sync_state["current_text"] = "上传相册..."
+                sync_state["current_text"] = f"上传相册... [{upload_target['label']}]"
                 media_list = []
                 for item, path in downloaded_files:
                     item_type, _ = get_msg_meta(item, mode)
@@ -407,7 +440,7 @@ async def sync_media_group(mode, sender, app, bot, source_id, target_id, group, 
                 if reply_to_id:
                     send_kwargs["reply_to_message_id"] = reply_to_id
                 if quote_data and reply_to_id:
-                    if client == bot_engine.aiogram_bot:
+                    if actual_sender == "bot":
                         send_kwargs.pop("reply_to_message_id", None)
                         send_kwargs["reply_parameters"] = ReplyParameters(
                             message_id=reply_to_id,
@@ -421,6 +454,9 @@ async def sync_media_group(mode, sender, app, bot, source_id, target_id, group, 
                 sent_msgs = await safe_execute(client.send_media_group(**send_kwargs))
                 for orig_m, new_m in zip(group, sent_msgs):
                     await record_success(source_id, orig_m.id, new_m.message_id if actual_sender == "bot" else new_m.id, force_send=force_send)
+                if actual_sender == "bot":
+                    await bot_engine.note_upload_success(client, sum(file_sizes))
+                sent_group_success = True
                 if quote_data and reply_to_id:
                     await db.add_msg_log("CLONE_QUOTE_GROUP_SEND", f"原始:[{source_id}] 组首ID:{group[0].id} | 已按引用回复发送媒体组")
                 break
@@ -428,6 +464,25 @@ async def sync_media_group(mode, sender, app, bot, source_id, target_id, group, 
                 if "STOP_REQUESTED" in str(e):
                     raise e
                 await asyncio.sleep(2)
+
+        if not sync_state["stop_requested"] and sender == "bot" and actual_sender == "bot" and not sent_group_success:
+            first_id = group[0].id if group else 0
+            await db.add_msg_log("BOT_FALLBACK", f"原始:[{source_id}] 组首ID:{first_id} | {upload_target['label']} 上传失败，回退辅助账号重传")
+            media_list = []
+            for item, path in downloaded_files:
+                item_type, _ = get_msg_meta(item, mode)
+                media_cls = PYRO_MEDIA_CLS.get(item_type, PYRO_MEDIA_CLS["document"])
+                media_list.append(media_cls(media=path, caption=item.caption.html if item.caption else "", parse_mode=ParseMode.HTML))
+            send_kwargs = {"chat_id": target_id, "media": media_list}
+            if reply_to_id:
+                send_kwargs["reply_to_message_id"] = reply_to_id
+            if quote_data and reply_to_id:
+                send_kwargs["quote_text"] = quote_data["text"]
+                if quote_data.get("entities"):
+                    send_kwargs["quote_entities"] = quote_data["entities"]
+            sent_msgs = await safe_execute(app.send_media_group(**send_kwargs))
+            for orig_m, new_m in zip(group, sent_msgs):
+                await record_success(source_id, orig_m.id, new_m.id, force_send=force_send)
 
         for _, path in downloaded_files:
             try:

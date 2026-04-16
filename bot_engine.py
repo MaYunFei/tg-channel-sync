@@ -1,6 +1,7 @@
 ﻿import asyncio
 import logging
 import time
+from math import ceil
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher
@@ -18,6 +19,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 aiogram_bot = None
 pyro_user_app = None
+upload_bots = []
 dp = Dispatcher()
 media_group_cache = {}
 user_auth_state = {
@@ -29,6 +31,7 @@ user_auth_state = {
     "password_hint": "",
     "send_code_available_at": 0.0,
 }
+upload_bot_rr_index = 0
 
 MSG_TYPES = ["photo", "video", "animation", "audio", "voice", "sticker", "document"]
 
@@ -54,35 +57,179 @@ def has_bot_token():
     return bool(_telegram_config().get("bot_token"))
 
 
+def has_local_bot_api_server():
+    return bool(_telegram_config().get("bot_api_base_url"))
+
+
 def has_user_api_credentials():
     telegram = _telegram_config()
     return bool(telegram.get("api_id") and telegram.get("api_hash"))
 
 
+def _build_bot_client(bot_token: str):
+    session_kwargs = {"timeout": 3600, "proxy": build_proxy_url()}
+    if _telegram_config().get("bot_api_base_url"):
+        session_kwargs["api"] = TelegramAPIServer.from_base(_telegram_config()["bot_api_base_url"])
+    session = AiohttpSession(**session_kwargs)
+    return Bot(token=bot_token, session=session)
+
+
+def _build_upload_bot_pool(primary_bot, primary_token: str):
+    telegram = _telegram_config()
+    seen_tokens = set()
+    pool = []
+
+    def add_bot(client, token: str, label: str):
+        clean_token = str(token or "").strip()
+        if not clean_token or clean_token in seen_tokens:
+            return
+        seen_tokens.add(clean_token)
+        pool.append(
+            {
+                "client": client,
+                "token": clean_token,
+                "label": label,
+                "window_started_at": 0.0,
+                "uploaded_bytes": 0,
+                "cooldown_until": 0.0,
+            }
+        )
+
+    if primary_bot is not None:
+        add_bot(primary_bot, primary_token, "主Bot")
+
+    for index, token in enumerate(telegram.get("extra_bot_tokens", []), start=2):
+        try:
+            add_bot(_build_bot_client(str(token).strip()), token, f"Bot#{index}")
+        except Exception as exc:
+            logging.warning("Init extra bot failed for Bot#%s: %s", index, exc)
+
+    return pool
+
+
 def init_bot_client():
-    global aiogram_bot
+    global aiogram_bot, upload_bots, upload_bot_rr_index
     telegram = _telegram_config()
     bot_token = telegram.get("bot_token", "").strip()
     if not bot_token:
         aiogram_bot = None
+        upload_bots = []
         return None
 
-    session_kwargs = {"timeout": 3600, "proxy": build_proxy_url()}
-    if telegram.get("bot_api_base_url"):
-        session_kwargs["api"] = TelegramAPIServer.from_base(telegram["bot_api_base_url"])
-    session = AiohttpSession(**session_kwargs)
-    aiogram_bot = Bot(token=bot_token, session=session)
+    aiogram_bot = _build_bot_client(bot_token)
+    upload_bots = _build_upload_bot_pool(aiogram_bot, bot_token)
+    upload_bot_rr_index = 0
     return aiogram_bot
 
 
 async def close_bot_client():
-    global aiogram_bot
-    if aiogram_bot is not None:
+    global aiogram_bot, upload_bots, upload_bot_rr_index
+    closed_clients = set()
+    for item in upload_bots:
+        client = item["client"]
+        if client is not None and id(client) not in closed_clients:
+            closed_clients.add(id(client))
+            try:
+                await client.session.close()
+            except Exception:
+                pass
+    if aiogram_bot is not None and id(aiogram_bot) not in closed_clients:
         try:
             await aiogram_bot.session.close()
         except Exception:
             pass
     aiogram_bot = None
+    upload_bots = []
+    upload_bot_rr_index = 0
+
+
+def get_upload_bot_count():
+    return len(upload_bots) or (1 if aiogram_bot is not None else 0)
+
+
+def is_bot_client(client) -> bool:
+    if client is None:
+        return False
+    if aiogram_bot is not None and client == aiogram_bot:
+        return True
+    return any(item["client"] == client for item in upload_bots)
+
+
+def should_prefer_local_bot_api_upload():
+    sync_cfg = get_config()["sync"]
+    return bool(sync_cfg.get("prefer_local_bot_api", True) and has_local_bot_api_server())
+
+
+def should_upload_via_bot(file_size: int) -> bool:
+    if aiogram_bot is None:
+        return False
+    if should_prefer_local_bot_api_upload():
+        return True
+    max_mb = float(get_config()["sync"].get("bot_upload_max_mb", 50) or 50)
+    return file_size <= max_mb * 1024 * 1024
+
+
+def _reset_window_if_needed(bot_state: dict, now: float, window_seconds: float):
+    if bot_state["window_started_at"] <= 0:
+        bot_state["window_started_at"] = now
+        bot_state["uploaded_bytes"] = 0
+        return
+    if now - bot_state["window_started_at"] >= window_seconds:
+        bot_state["window_started_at"] = now
+        bot_state["uploaded_bytes"] = 0
+
+
+async def acquire_upload_bot(file_size: int):
+    global upload_bot_rr_index
+    if not upload_bots:
+        if aiogram_bot is None:
+            raise RuntimeError("BOT 未配置或未连接，无法执行 bot 上传")
+        return {"client": aiogram_bot, "label": "主Bot"}
+
+    sync_cfg = get_config()["sync"]
+    rate_limit_enabled = bool(sync_cfg.get("bot_rate_limit_enabled", False))
+    threshold_bytes = int(float(sync_cfg.get("bot_rate_limit_gb", 10) or 10) * 1024 * 1024 * 1024)
+    window_seconds = float(sync_cfg.get("bot_rate_limit_window_hours", 24) or 24) * 3600
+    cooldown_seconds = float(sync_cfg.get("bot_rate_limit_cooldown_minutes", 300) or 300) * 60
+
+    while True:
+        now = time.time()
+        earliest_ready_at = None
+        total = len(upload_bots)
+
+        for offset in range(total):
+            idx = (upload_bot_rr_index + offset) % total
+            bot_state = upload_bots[idx]
+            if rate_limit_enabled:
+                _reset_window_if_needed(bot_state, now, window_seconds)
+            if bot_state["cooldown_until"] > now:
+                earliest_ready_at = bot_state["cooldown_until"] if earliest_ready_at is None else min(earliest_ready_at, bot_state["cooldown_until"])
+                continue
+            if rate_limit_enabled and threshold_bytes > 0 and bot_state["uploaded_bytes"] + file_size > threshold_bytes:
+                if bot_state["cooldown_until"] <= now:
+                    bot_state["cooldown_until"] = now + cooldown_seconds
+                    wait_minutes = max(1, ceil(cooldown_seconds / 60))
+                    await db.add_msg_log("BOT_ROTATE", f"{bot_state['label']} 达到上传阈值，暂停 {wait_minutes} 分钟并轮换下一个 bot")
+                earliest_ready_at = bot_state["cooldown_until"] if earliest_ready_at is None else min(earliest_ready_at, bot_state["cooldown_until"])
+                continue
+            upload_bot_rr_index = (idx + 1) % total
+            return {"client": bot_state["client"], "label": bot_state["label"]}
+
+        wait_seconds = max(1, int((earliest_ready_at or (now + 5)) - now))
+        await db.add_msg_log("BOT_WAIT", f"全部 bot 暂时不可用，等待 {wait_seconds} 秒后继续")
+        await asyncio.sleep(wait_seconds)
+
+
+async def note_upload_success(bot_client, file_size: int):
+    if not upload_bots:
+        return
+    now = time.time()
+    window_seconds = float(get_config()["sync"].get("bot_rate_limit_window_hours", 24) or 24) * 3600
+    for bot_state in upload_bots:
+        if bot_state["client"] == bot_client:
+            _reset_window_if_needed(bot_state, now, window_seconds)
+            bot_state["uploaded_bytes"] += max(0, int(file_size))
+            break
 
 
 def get_chat_name(chat):

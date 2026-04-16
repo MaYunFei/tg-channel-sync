@@ -18,6 +18,10 @@ def config_file() -> Path:
     return app_root() / "config.json"
 
 
+def version_file() -> Path:
+    return app_root() / "VERSION"
+
+
 def data_dir() -> Path:
     return app_root() / "data"
 

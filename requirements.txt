@@ -1,5 +1,6 @@
 aiogram>=3.4.0
 pyrofork>=2.2.0
+TgCrypto-pyrofork>=1.2.8
 fastapi>=0.110.0
 uvicorn>=0.29.0
 aiosqlite>=0.20.0
