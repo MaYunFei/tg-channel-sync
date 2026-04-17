@@ -46,7 +46,7 @@ class JsonSyncTests(unittest.IsolatedAsyncioTestCase):
                 await json_sync.process_json_sync("@target", str(json_path), 0.5, False)
 
             mock_bot.send_photo.assert_not_awaited()
-            mock_add_msg_log.assert_any_await("JSON_DROP_TYPE", "消息ID:1 | type=photo")
+            mock_add_msg_log.assert_any_await("JSON_DROP_TYPE", "消息ID:1 | 类型:photo | 已被类型过滤拦截")
 
     async def test_process_json_sync_respects_regex_filter(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -80,4 +80,4 @@ class JsonSyncTests(unittest.IsolatedAsyncioTestCase):
                 await json_sync.process_json_sync("@target", str(json_path), 0.5, False)
 
             mock_bot.send_message.assert_not_awaited()
-            mock_add_msg_log.assert_any_await("JSON_DROP_REGEX", "消息ID:2")
+            mock_add_msg_log.assert_any_await("JSON_DROP_REGEX", "消息ID:2 | 已被正则过滤拦截")

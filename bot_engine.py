@@ -267,7 +267,7 @@ async def handle_new_post(message: Message):
     msg_type = get_msg_type(message)
 
     if not await is_type_allowed(msg_type):
-        await db.add_msg_log("DROP_TYPE", f"[{chat_name}] id={message.message_id} type={msg_type}")
+        await db.add_msg_log("DROP_TYPE", f"[{chat_name}] 消息ID:{message.message_id} | 类型:{msg_type} | 已被类型过滤拦截")
         return
 
     if message.media_group_id:
@@ -283,11 +283,11 @@ async def handle_new_post(message: Message):
                     file_name = item.document.file_name if item.document else (item.video.file_name if item.video else "")
                     should_skip, _ = await db.apply_message_filters(text_html, True, file_name or "")
                     if should_skip:
-                        await db.add_msg_log("DROP_REGEX", f"[{chat_name}] group_ids={[m.message_id for m in group]}")
+                        await db.add_msg_log("DROP_REGEX", f"[{chat_name}] 媒体组消息ID:{[m.message_id for m in group]} | 已被正则过滤拦截")
                         return
 
                 msg_ids = [item.message_id for item in group]
-                await db.add_msg_log("RECV_GROUP", f"[{chat_name}] group_ids={msg_ids}")
+                await db.add_msg_log("RECV_GROUP", f"[{chat_name}] 媒体组消息ID:{msg_ids}")
                 for target_id in target_ids:
                     reply_to_id = await resolve_reply_for_forward(source_id, target_id, group[0].message_id, getattr(group[0], "reply_to_message_id", None))
                     try:
@@ -302,10 +302,10 @@ async def handle_new_post(message: Message):
                         for original, copied in zip(group, copied_ids):
                             await db.save_msg_mapping(source_id, original.message_id, target_id, copied.message_id)
                         if quote_data and reply_to_id:
-                            await db.add_msg_log("QUOTE_GROUP_SEND", f"source={source_id} target={target_id} group_start={group[0].message_id} quote_preserved=1")
-                        await db.add_msg_log("SEND_GROUP", f"source={source_id} target={target_id} ids={msg_ids}")
+                            await db.add_msg_log("QUOTE_GROUP_SEND", f"源频道:{source_id} | 目标频道:{target_id} | 组首消息ID:{group[0].message_id} | 已保留引用回复")
+                        await db.add_msg_log("SEND_GROUP", f"源频道:{source_id} | 目标频道:{target_id} | 媒体组消息ID:{msg_ids} | 转发成功")
                     except Exception:
-                        await db.add_msg_log("WARN", f"copy_messages failed, fallback to single copy target={target_id}")
+                        await db.add_msg_log("WARN", f"目标频道:{target_id} | 媒体组整组复制失败，已回退为逐条复制")
                         for item in group:
                             try:
                                 kwargs = {"chat_id": target_id, "from_chat_id": source_id, "message_id": item.message_id}
@@ -328,17 +328,17 @@ async def handle_new_post(message: Message):
     text_html = message.html_text if message.text or message.caption else ""
     quote_data = get_quote_payload(message)
 
-    await db.add_msg_log("RECV", f"[{chat_name}] id={message.message_id} type={msg_type}")
+    await db.add_msg_log("RECV", f"[{chat_name}] 消息ID:{message.message_id} | 类型:{msg_type}")
 
     should_skip, new_html = await db.apply_message_filters(text_html, has_media, file_name)
     if should_skip or (not has_media and not new_html.strip()):
-        await db.add_msg_log("DROP_REGEX", f"[{chat_name}] id={message.message_id}")
+        await db.add_msg_log("DROP_REGEX", f"[{chat_name}] 消息ID:{message.message_id} | 已被正则过滤拦截")
         return
     for target_id in target_ids:
         link_context = await build_link_rewrite_context(aiogram_bot, source_id, target_id)
         target_html, rewrite_count = await rewrite_message_links(new_html, source_id, link_context)
         if rewrite_count:
-            await db.add_msg_log("LINK_REWRITE", f"source={source_id} target={target_id} message_links={rewrite_count}")
+            await db.add_msg_log("LINK_REWRITE", f"源频道:{source_id} | 目标频道:{target_id} | 消息链接改写:{rewrite_count}处")
         reply_to_id = await resolve_reply_for_forward(source_id, target_id, message.message_id, getattr(message, "reply_to_message_id", None))
 
         try:
@@ -374,10 +374,10 @@ async def handle_new_post(message: Message):
 
             await db.save_msg_mapping(source_id, message.message_id, target_id, copied.message_id)
             if quote_data and reply_to_id:
-                await db.add_msg_log("QUOTE_SEND", f"source={source_id} target={target_id} message={message.message_id} quote_preserved=1")
-            await db.add_msg_log("SEND", f"source={source_id} message={message.message_id} target={target_id} new={copied.message_id}")
+                await db.add_msg_log("QUOTE_SEND", f"源频道:{source_id} | 目标频道:{target_id} | 消息ID:{message.message_id} | 已保留引用回复")
+            await db.add_msg_log("SEND", f"源频道:{source_id} | 消息ID:{message.message_id} | 目标频道:{target_id} | 新消息ID:{copied.message_id} | 转发成功")
         except Exception as exc:
-            await db.add_msg_log("ERROR", f"send failed id={message.message_id} target={target_id} error={exc}")
+            await db.add_msg_log("ERROR", f"消息ID:{message.message_id} | 目标频道:{target_id} | 发送失败: {exc}")
 
 
 @dp.edited_channel_post()
@@ -406,8 +406,8 @@ async def handle_edited_post(message: Message):
             else:
                 await aiogram_bot.edit_message_caption(caption=target_html, **kwargs)
             if rewrite_count:
-                await db.add_msg_log("LINK_REWRITE", f"source={source_id} target={target_id} message_links={rewrite_count}")
-            await db.add_msg_log("EDIT", f"source={msg_id} target={target_id}:{target_msg_id}")
+                await db.add_msg_log("LINK_REWRITE", f"源频道:{source_id} | 目标频道:{target_id} | 消息链接改写:{rewrite_count}处")
+            await db.add_msg_log("EDIT", f"源消息ID:{msg_id} | 目标频道:{target_id} | 目标消息ID:{target_msg_id} | 编辑成功")
         except Exception:
             pass
 

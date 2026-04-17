@@ -55,7 +55,7 @@ async def process_json_sync(target_id_raw, json_path, safe_delay, force_send, js
         msg_id = msg.get("id", 0)
         msg_type, sync_key = get_msg_meta(msg, "json")
         if settings.get(sync_key, "1") == "0":
-            await db.add_msg_log("JSON_DROP_TYPE", f"消息ID:{msg_id} | type={msg_type}")
+            await db.add_msg_log("JSON_DROP_TYPE", f"消息ID:{msg_id} | 类型:{msg_type} | 已被类型过滤拦截")
             continue
 
         text = build_json_text(msg)
@@ -80,7 +80,7 @@ async def process_json_sync(target_id_raw, json_path, safe_delay, force_send, js
 
         should_skip, text = await db.apply_message_filters(text, msg_type != "text", file_name)
         if should_skip or (msg_type == "text" and not text.strip()):
-            await db.add_msg_log("JSON_DROP_REGEX", f"消息ID:{msg_id}")
+            await db.add_msg_log("JSON_DROP_REGEX", f"消息ID:{msg_id} | 已被正则过滤拦截")
             continue
 
         if await update_state_and_check_skip(0, target_id, msg_id, text[:50] or "[媒体]", force_send=force_send):

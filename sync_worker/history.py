@@ -32,6 +32,7 @@ from .common import (
     resolve_clone_upload_target,
     rewrite_media_group_captions,
 )
+from .hash_perturb import perturb_clone_media
 from .json_sync import process_json_sync
 from .state import (
     TEMP_DIR,
@@ -47,7 +48,36 @@ from .state import (
 AIO_MEDIA_CLS = {"photo": AioPhoto, "video": AioVideo, "audio": AioAudio, "document": AioDoc}
 
 
-async def sync_single_message(mode, sender, app, bot, source_id, target_id, msg, safe_delay, force_send):
+def describe_hash_perturb_reason(reason: str) -> str:
+    if reason == "disabled":
+        return "未启用指纹重置"
+    if reason == "unsupported_type":
+        return "当前类型不支持处理"
+    if reason == "tail_bytes_appended":
+        return "已在文件尾部追加随机字节"
+    if reason.startswith("append_error:"):
+        detail = reason.split(":", 1)[1].strip()
+        return f"追加尾部字节失败: {detail or '未知错误'}"
+    return reason or "未知状态"
+
+
+async def maybe_perturb_clone_media(file_path: str, msg_type: str, msg_id: int, enabled: bool) -> str:
+    if msg_type not in {"photo", "video"}:
+        return file_path
+
+    if not enabled:
+        await db.add_msg_log("HASH_PERTURB_SKIP", f"消息ID:{msg_id} | 类型:{msg_type} | {describe_hash_perturb_reason('disabled')}")
+        return file_path
+
+    result = perturb_clone_media(file_path, msg_type)
+    if result.changed:
+        await db.add_msg_log("HASH_PERTURB_OK", f"消息ID:{msg_id} | 类型:{msg_type} | {describe_hash_perturb_reason(result.reason)}")
+    else:
+        await db.add_msg_log("HASH_PERTURB_SKIP", f"消息ID:{msg_id} | 类型:{msg_type} | {describe_hash_perturb_reason(result.reason)}")
+    return result.path
+
+
+async def sync_single_message(mode, sender, app, bot, source_id, target_id, msg, safe_delay, force_send, hash_perturb=False):
     msg_type, _ = get_msg_meta(msg, mode)
     has_media = msg_type != "text"
     file_name = getattr(getattr(msg, msg_type, None), "file_name", "") if msg_type in ["document", "video"] else ""
@@ -145,6 +175,7 @@ async def sync_single_message(mode, sender, app, bot, source_id, target_id, msg,
                 if not file_path or sync_state["stop_requested"]:
                     return
 
+                file_path = await maybe_perturb_clone_media(file_path, msg_type, msg.id, hash_perturb)
                 file_size = os.path.getsize(file_path)
                 upload_target = await safe_execute(resolve_clone_upload_target(sender, app, [file_size]), sync_state)
                 actual_sender = upload_target["sender"]
@@ -226,7 +257,7 @@ async def sync_single_message(mode, sender, app, bot, source_id, target_id, msg,
     await asyncio.sleep(safe_delay)
 
 
-async def sync_media_group(mode, sender, app, bot, source_id, target_id, group, safe_delay, force_send):
+async def sync_media_group(mode, sender, app, bot, source_id, target_id, group, safe_delay, force_send, hash_perturb=False):
     if await update_state_and_check_skip(source_id, target_id, group[0].id, "[媒体组]", force_send=force_send):
         return
 
@@ -322,6 +353,19 @@ async def sync_media_group(mode, sender, app, bot, source_id, target_id, group, 
                 except Exception:
                     pass
             return
+
+        if hash_perturb:
+            perturbed_files = []
+            for item, path in downloaded_files:
+                item_type, _ = get_msg_meta(item, mode)
+                new_path = await maybe_perturb_clone_media(path, item_type, item.id, True)
+                perturbed_files.append((item, new_path))
+            downloaded_files = perturbed_files
+        else:
+            for item, _ in downloaded_files:
+                item_type, _ = get_msg_meta(item, mode)
+                if item_type in {"photo", "video"}:
+                    await db.add_msg_log("HASH_PERTURB_SKIP", f"消息ID:{item.id} | 类型:{item_type} | {describe_hash_perturb_reason('disabled')}")
 
         file_sizes = [os.path.getsize(path) for _, path in downloaded_files]
         upload_target = await safe_execute(resolve_clone_upload_target(sender, app, file_sizes), sync_state)
@@ -431,6 +475,7 @@ async def process_master_sync(
     json_path: str,
     force_send: bool = False,
     json_source_username: str = "",
+    hash_perturb: bool = False,
 ):
     safe_delay = max(0.5, float(delay))
     if mode == "api":
@@ -448,6 +493,7 @@ async def process_master_sync(
         json_path,
         force_send,
         json_source_username,
+        hash_perturb,
     )
     settings = await db.get_all_settings()
 
@@ -496,9 +542,9 @@ async def process_master_sync(
                     if sync_state["stop_requested"]:
                         break
                     if len(group) == 1:
-                        await sync_single_message(mode, sender, app, bot, source_id, target_id, group[0], safe_delay, force_send)
+                        await sync_single_message(mode, sender, app, bot, source_id, target_id, group[0], safe_delay, force_send, hash_perturb=hash_perturb)
                     else:
-                        await sync_media_group(mode, sender, app, bot, source_id, target_id, group, safe_delay, force_send)
+                        await sync_media_group(mode, sender, app, bot, source_id, target_id, group, safe_delay, force_send, hash_perturb=hash_perturb)
         else:
             await process_json_sync(target_id_raw, json_path, safe_delay, force_send, json_source_username=json_source_username)
 

@@ -24,6 +24,7 @@ sync_state = {
     "json_path": "",
     "json_source_username": "",
     "force_send": False,
+    "hash_perturb": False,
 }
 
 
@@ -37,6 +38,7 @@ def start_sync_session(
     json_path: str,
     force_send: bool,
     json_source_username: str,
+    hash_perturb: bool = False,
 ) -> None:
     sync_state.update(
         {
@@ -54,6 +56,7 @@ def start_sync_session(
             "total": 0,
             "stop_requested": False,
             "force_send": force_send,
+            "hash_perturb": hash_perturb,
         }
     )
 

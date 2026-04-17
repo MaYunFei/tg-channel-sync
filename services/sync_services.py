@@ -77,12 +77,12 @@ async def resolve_reply_for_forward(
     if target_reply_id:
         await db.add_msg_log(
             "REPLY_MAP",
-            f"source={source_id} target={target_id} message={current_msg_id} reply_target={target_reply_id}",
+            f"源频道:{source_id} | 目标频道:{target_id} | 消息ID:{current_msg_id} | 已映射回复目标:{target_reply_id}",
         )
     else:
         await db.add_msg_log(
             "REPLY_FALLBACK",
-            f"source={source_id} target={target_id} message={current_msg_id} missing_reply_source={reply_source_msg_id}",
+            f"源频道:{source_id} | 目标频道:{target_id} | 消息ID:{current_msg_id} | 被回复消息ID:{reply_source_msg_id} 尚未同步，按普通消息发送",
         )
     return target_reply_id
 

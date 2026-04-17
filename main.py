@@ -525,6 +525,7 @@ async def start_sync(
     json_path: str = Form(""),
     json_source_username: str = Form(""),
     force_send: str = Form("0"),
+    hash_perturb: str = Form("0"),
 ):
     if sync_state["is_syncing"]:
         return {"status": "error", "message": "任务正在运行中"}
@@ -545,6 +546,7 @@ async def start_sync(
         json_path,
         force_send == "1",
         json_source_username,
+        hash_perturb == "1",
     )
 
     if mode == "json":
