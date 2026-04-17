@@ -22,7 +22,7 @@ import bot_engine
 import database as db
 from app_config import get_config, get_setup_status, save_config
 from app_paths import ensure_runtime_dirs, static_dir, temp_dir
-from services.sync_services import resolve_chat_id
+from services.sync_services import normalize_channel_username, resolve_chat_id
 from services.version_service import GITHUB_REPO, get_local_version, get_remote_version_info, is_version_at_least
 from sync_worker import process_master_sync, sync_state
 
@@ -524,8 +524,10 @@ async def start_sync(
     end_id: int = Form(0),
     json_path: str = Form(""),
     json_source_username: str = Form(""),
+    json_media_group_window_seconds: int = Form(3),
     force_send: str = Form("0"),
     hash_perturb: str = Form("0"),
+    clone_fallback_to_user: str = Form("1"),
 ):
     if sync_state["is_syncing"]:
         return {"status": "error", "message": "任务正在运行中"}
@@ -533,6 +535,14 @@ async def start_sync(
         return {"status": "error", "message": "请先在设置中配置并重启 BOT"}
     if mode in ["api", "clone"] and not bot_engine.pyro_user_app:
         return {"status": "error", "message": "请先完成辅助账号登录"}
+    if mode == "json" and sender == "user" and not bot_engine.pyro_user_app:
+        return {"status": "error", "message": "JSON 导入使用辅助账号发送前，请先完成辅助账号登录"}
+
+    json_media_group_window_seconds = getattr(
+        json_media_group_window_seconds,
+        "default",
+        json_media_group_window_seconds,
+    )
 
     background_tasks.add_task(
         process_master_sync,
@@ -546,11 +556,18 @@ async def start_sync(
         json_path,
         force_send == "1",
         json_source_username,
+        max(1, int(json_media_group_window_seconds or 3)),
         hash_perturb == "1",
+        clone_fallback_to_user == "1",
     )
 
     if mode == "json":
-        await db.add_sys_log("INFO", f"启动 JSON 任务 -> {target_id}" + (f" | 源频道用户名:@{str(json_source_username).lstrip('@')}" if json_source_username else ""))
+        normalized_source_username = normalize_channel_username(json_source_username)
+        await db.add_sys_log(
+            "INFO",
+            f"启动 JSON 任务 -> {target_id} | 发送身份:{'辅助账号' if sender == 'user' else '机器人'}"
+            + (f" | 源频道用户名:@{normalized_source_username}" if normalized_source_username else ""),
+        )
     else:
         await db.add_sys_log("INFO", f"启动 {mode.upper()} 任务: {source_id} -> {target_id}")
     return {"status": "success", "message": f"启动 {mode.upper()} 任务成功"}

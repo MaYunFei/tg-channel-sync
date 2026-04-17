@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
 import time
 from collections.abc import Awaitable, Callable
@@ -9,6 +10,34 @@ import database as db
 
 
 MESSAGE_LINK_RE = re.compile(r"https?://t\.me/(?:c/)?[^/\s]+/\d+")
+USERNAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{2,}$")
+
+
+def normalize_channel_username(channel_ref: str) -> str:
+    ref = str(channel_ref or "").strip()
+    if not ref:
+        return ""
+
+    if ref.startswith("@"):
+        candidate = ref[1:]
+    elif "t.me/" in ref.lower():
+        normalized = ref.replace("\\", "/")
+        candidate = normalized.split("t.me/", 1)[-1].split("?", 1)[0].split("#", 1)[0].split("/", 1)[0]
+    else:
+        candidate = ref
+
+    candidate = candidate.strip().lstrip("@")
+    if USERNAME_RE.fullmatch(candidate):
+        return candidate
+    return ""
+
+
+def build_json_source_scope_id(source_username: str) -> int:
+    normalized = normalize_channel_username(source_username)
+    if not normalized:
+        return 0
+    digest = hashlib.sha1(normalized.lower().encode("utf-8")).hexdigest()[:15]
+    return -int(digest, 16)
 
 
 async def resolve_chat_id(bot, chat_ref: str) -> int:
@@ -107,9 +136,8 @@ async def build_link_rewrite_context(bot, source_id, target_id, source_username_
 
 
 def _replace_msg_link(match, target_channel_ref: str, mapped_msg_id: int) -> str:
-    prefix = match.group("prefix")
     suffix = match.group("suffix") or ""
-    return f"{prefix}{target_channel_ref}/{mapped_msg_id}{suffix}"
+    return f"{target_channel_ref}/{mapped_msg_id}{suffix}"
 
 
 async def rewrite_message_links(text_html, source_id, link_context):
@@ -118,6 +146,10 @@ async def rewrite_message_links(text_html, source_id, link_context):
 
     updated_html = text_html
     rewrite_count = 0
+    target_internal_id = str(abs(link_context["target_id"])).removeprefix("100")
+
+    def has_internal_channel_id(chat_id: int) -> bool:
+        return str(abs(int(chat_id or 0))).startswith("100")
 
     async def replace_pattern(pattern, target_channel_ref):
         nonlocal updated_html, rewrite_count
@@ -133,18 +165,22 @@ async def rewrite_message_links(text_html, source_id, link_context):
             updated_html = updated_html.replace(original, replaced)
             rewrite_count += 1
 
-    if source_id != 0:
+    if source_id != 0 and has_internal_channel_id(source_id):
         source_internal_id = str(abs(source_id)).removeprefix("100")
-        target_internal_id = str(abs(link_context["target_id"])).removeprefix("100")
         await replace_pattern(
             re.compile(rf"(?P<prefix>https?://t\.me/c/{re.escape(source_internal_id)}/)(?P<msg_id>\d+)(?P<suffix>\b)"),
             f"https://t.me/c/{target_internal_id}",
         )
 
-    if link_context.get("source_username") and link_context.get("target_username"):
+    if link_context.get("source_username"):
+        target_channel_ref = (
+            f"https://t.me/{link_context['target_username']}"
+            if link_context.get("target_username")
+            else f"https://t.me/c/{target_internal_id}"
+        )
         await replace_pattern(
             re.compile(rf"(?P<prefix>https?://t\.me/{re.escape(link_context['source_username'])}/)(?P<msg_id>\d+)(?P<suffix>\b)"),
-            f"https://t.me/{link_context['target_username']}",
+            target_channel_ref,
         )
 
     return updated_html, rewrite_count

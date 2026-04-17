@@ -185,7 +185,7 @@ def _reset_window_if_needed(bot_state: dict, now: float, window_seconds: float):
         bot_state["uploaded_bytes"] = 0
 
 
-async def acquire_upload_bot(file_size: int):
+async def acquire_upload_bot(file_size: int, wait_if_unavailable: bool = True):
     global upload_bot_rr_index
     if not upload_bots:
         if aiogram_bot is None:
@@ -221,8 +221,10 @@ async def acquire_upload_bot(file_size: int):
             upload_bot_rr_index = (idx + 1) % total
             return {"client": bot_state["client"], "label": bot_state["label"]}
 
+        if not wait_if_unavailable:
+            return None
         wait_seconds = max(1, int((earliest_ready_at or (now + 5)) - now))
-        await db.add_msg_log("BOT_WAIT", f"全部 bot 暂时不可用，等待 {wait_seconds} 秒后继续")
+        await db.add_msg_log("BOT_WAIT", f"全部 bot 暂时不可用，等待 {wait_seconds} 秒后继续；如需立即继续，可切换为辅助账号发送")
         await asyncio.sleep(wait_seconds)
 
 
@@ -236,6 +238,21 @@ async def note_upload_success(bot_client, file_size: int):
             _reset_window_if_needed(bot_state, now, window_seconds)
             bot_state["uploaded_bytes"] += max(0, int(file_size))
             break
+
+
+async def mark_upload_bot_cooldown(bot_client, cooldown_seconds: int, reason: str = ""):
+    if not upload_bots or bot_client is None:
+        return None
+    now = time.time()
+    wait_seconds = max(1, int(cooldown_seconds or 0))
+    for bot_state in upload_bots:
+        if bot_state["client"] != bot_client:
+            continue
+        bot_state["cooldown_until"] = max(float(bot_state.get("cooldown_until", 0.0) or 0.0), now + wait_seconds)
+        detail = f" | {reason}" if reason else ""
+        await db.add_msg_log("BOT_ROTATE", f"{bot_state['label']} 遇到频控，冷却 {wait_seconds} 秒并轮换下一个 bot{detail}")
+        return bot_state["label"]
+    return None
 
 
 def get_chat_name(chat):

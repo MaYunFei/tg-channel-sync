@@ -23,13 +23,16 @@ sync_state = {
     "end_id": "",
     "json_path": "",
     "json_source_username": "",
+    "sender": "bot",
     "force_send": False,
     "hash_perturb": False,
+    "clone_fallback_to_user": True,
 }
 
 
 def start_sync_session(
     mode: str,
+    sender: str,
     source_id_raw: str,
     target_id_raw: str,
     delay: float,
@@ -39,6 +42,7 @@ def start_sync_session(
     force_send: bool,
     json_source_username: str,
     hash_perturb: bool = False,
+    clone_fallback_to_user: bool = True,
 ) -> None:
     sync_state.update(
         {
@@ -51,12 +55,14 @@ def start_sync_session(
             "end_id": end_id,
             "json_path": json_path,
             "json_source_username": json_source_username,
+            "sender": sender,
             "current": 0,
             "skipped": 0,
             "total": 0,
             "stop_requested": False,
             "force_send": force_send,
             "hash_perturb": hash_perturb,
+            "clone_fallback_to_user": clone_fallback_to_user,
         }
     )
 

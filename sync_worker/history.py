@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-
+import re
 from aiogram.types import FSInputFile
 from aiogram.types import InputMediaAudio as AioAudio
 from aiogram.types import InputMediaDocument as AioDoc
@@ -25,10 +25,15 @@ from services.sync_services import (
 )
 from .common import (
     PYRO_MEDIA_CLS,
+    ProgressFSInputFile,
+    UploadProgressTracker,
+    build_pyro_progress_callback,
     dynamic_send,
+    format_upload_label,
     get_media_reference,
     get_msg_meta,
     get_reply_source_msg_id,
+    normalize_bot_html,
     resolve_clone_upload_target,
     rewrite_media_group_captions,
 )
@@ -46,6 +51,8 @@ from .state import (
 
 
 AIO_MEDIA_CLS = {"photo": AioPhoto, "video": AioVideo, "audio": AioAudio, "document": AioDoc}
+RETRY_AFTER_RE = re.compile(r"retry after\s+(?P<seconds>\d+)", re.IGNORECASE)
+WAIT_REQUIRED_RE = re.compile(r"wait of\s+(?P<seconds>\d+)\s+seconds?\s+is required", re.IGNORECASE)
 
 
 def describe_hash_perturb_reason(reason: str) -> str:
@@ -77,7 +84,93 @@ async def maybe_perturb_clone_media(file_path: str, msg_type: str, msg_id: int, 
     return result.path
 
 
-async def sync_single_message(mode, sender, app, bot, source_id, target_id, msg, safe_delay, force_send, hash_perturb=False):
+def _parse_retry_after_seconds(exc: Exception) -> int | None:
+    text = str(exc)
+    match = RETRY_AFTER_RE.search(text) or WAIT_REQUIRED_RE.search(text)
+    if not match:
+        return None
+    return max(1, int(match.group("seconds")))
+
+
+def _is_request_entity_too_large(exc: Exception) -> bool:
+    return "request entity too large" in str(exc).lower()
+
+
+def _is_chat_forwards_restricted(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "chat_forwards_restricted" in text or "restricts forwarding content" in text
+
+
+def _build_temp_download_path(msg, msg_type: str) -> str:
+    media_obj = getattr(msg, msg_type, None)
+    original_name = str(getattr(media_obj, "file_name", "") or "").strip()
+    safe_name = re.sub(r'[<>:"/\\|?*]+', "_", original_name)
+    base_name, ext = os.path.splitext(safe_name)
+    if not base_name:
+        default_ext = {
+            "photo": ".jpg",
+            "video": ".mp4",
+            "animation": ".mp4",
+            "audio": ".mp3",
+            "voice": ".ogg",
+            "sticker": ".webp",
+            "document": "",
+        }
+        ext = ext or default_ext.get(msg_type, "")
+        base_name = f"{msg_type}_{getattr(msg, 'id', 'media')}"
+    return os.path.join(TEMP_DIR, f"{getattr(msg, 'id', 'media')}_{base_name}{ext}")
+
+
+def _get_media_thumbs(msg, msg_type: str):
+    media_obj = getattr(msg, msg_type, None)
+    thumbs = getattr(media_obj, "thumbs", None) if media_obj else None
+    return thumbs or []
+
+
+def _build_temp_thumbnail_path(msg, msg_type: str) -> str:
+    return os.path.join(TEMP_DIR, f"{getattr(msg, 'id', 'media')}_{msg_type}_thumb.jpg")
+
+
+async def _download_media_thumbnail(app, msg, msg_type: str) -> str | None:
+    thumbs = _get_media_thumbs(msg, msg_type)
+    if not thumbs:
+        return None
+    thumb = thumbs[-1]
+    thumb_ref = getattr(thumb, "file_id", None)
+    if not thumb_ref:
+        return None
+    thumb_path = _build_temp_thumbnail_path(msg, msg_type)
+    try:
+        downloaded = await safe_execute(app.download_media(thumb_ref, file_name=thumb_path), sync_state)
+    except Exception:
+        return None
+    return downloaded if isinstance(downloaded, str) and os.path.exists(downloaded) else None
+
+
+async def _execute_with_clone_retry(coro_factory, *, action_label: str):
+    while True:
+        try:
+            return await safe_execute(coro_factory(), sync_state)
+        except Exception as exc:
+            if sync_state.get("stop_requested"):
+                raise
+            retry_after = _parse_retry_after_seconds(exc)
+            if retry_after is None:
+                raise
+            wait_seconds = retry_after + 1
+            sync_state["current_text"] = f"等待重试\n上传阶段触发频控，需等待 {wait_seconds} 秒"
+            await db.add_msg_log(
+                "CLONE_RETRY",
+                f"{action_label} | 上传阶段遇到频控，等待 {wait_seconds} 秒后重试；若当前走 Bot 发送，可切换为辅助账号继续发送",
+            )
+            await asyncio.sleep(wait_seconds)
+
+
+def _clone_should_fallback_to_user(sender: str, clone_fallback_to_user: bool) -> bool:
+    return sender == "bot" and bool(clone_fallback_to_user)
+
+
+async def sync_single_message(mode, sender, app, bot, source_id, target_id, msg, safe_delay, force_send, hash_perturb=False, clone_fallback_to_user=True):
     msg_type, _ = get_msg_meta(msg, mode)
     has_media = msg_type != "text"
     file_name = getattr(getattr(msg, msg_type, None), "file_name", "") if msg_type in ["document", "video"] else ""
@@ -93,6 +186,7 @@ async def sync_single_message(mode, sender, app, bot, source_id, target_id, msg,
     reply_to_id = await resolve_reply_target(source_id, target_id, get_reply_source_msg_id(msg, mode), mode.upper(), msg.id)
     link_context = await build_link_rewrite_context(bot_engine.aiogram_bot, source_id, target_id)
     new_html, rewrite_count = await rewrite_message_links(new_html, source_id, link_context)
+    new_html = normalize_bot_html(new_html)
     if rewrite_count:
         await db.add_msg_log(f"{mode.upper()}_LINK_REWRITE", f"原始:[{source_id}] 消息ID:{msg.id} | 命中 {rewrite_count} 个链接改写")
 
@@ -138,8 +232,8 @@ async def sync_single_message(mode, sender, app, bot, source_id, target_id, msg,
                 sent_id = (await safe_execute(app.copy_message(**kwargs), sync_state)).id
         else:
             if not has_media:
-                sent = await safe_execute(
-                    dynamic_send(
+                sent = await _execute_with_clone_retry(
+                    lambda: dynamic_send(
                         bot if sender == "bot" else app,
                         "text",
                         target_id,
@@ -149,7 +243,7 @@ async def sync_single_message(mode, sender, app, bot, source_id, target_id, msg,
                         reply_to_message_id=reply_to_id,
                         quote_data=quote_data if reply_to_id else None,
                     ),
-                    sync_state,
+                    action_label=f"单条消息 {msg.id}",
                 )
                 sent_id = sent.message_id if sender == "bot" else sent.id
             else:
@@ -158,10 +252,11 @@ async def sync_single_message(mode, sender, app, bot, source_id, target_id, msg,
                     if sync_state["stop_requested"]:
                         break
                     try:
+                        download_target = _build_temp_download_path(msg, msg_type)
                         file_path = await safe_execute(
                             app.download_media(
                                 msg,
-                                file_name=f"{TEMP_DIR}/",
+                                file_name=download_target,
                                 progress=create_progress_callback("下载中", sync_state),
                             ),
                             sync_state,
@@ -171,26 +266,48 @@ async def sync_single_message(mode, sender, app, bot, source_id, target_id, msg,
                     except Exception as exc:
                         if "STOP_REQUESTED" in str(exc):
                             raise
+                        retry_after = _parse_retry_after_seconds(exc)
+                        if retry_after is not None:
+                            wait_seconds = retry_after + 1
+                            sync_state["current_text"] = f"等待重试\n下载阶段触发频控，需等待 {wait_seconds} 秒"
+                            await db.add_msg_log(
+                                "CLONE_DOWNLOAD_WAIT",
+                                f"消息ID:{msg.id} | 下载阶段遇到频控，需等待 {wait_seconds} 秒后重试；切换发送身份无效，建议稍后继续",
+                            )
+                            await asyncio.sleep(wait_seconds)
+                            continue
                         await asyncio.sleep(2)
                 if not file_path or sync_state["stop_requested"]:
                     return
 
                 file_path = await maybe_perturb_clone_media(file_path, msg_type, msg.id, hash_perturb)
                 file_size = os.path.getsize(file_path)
-                upload_target = await safe_execute(resolve_clone_upload_target(sender, app, [file_size]), sync_state)
+                upload_target = await safe_execute(
+                    resolve_clone_upload_target(
+                        sender,
+                        app,
+                        [file_size],
+                        allow_user_fallback=_clone_should_fallback_to_user(sender, clone_fallback_to_user),
+                    ),
+                    sync_state,
+                )
                 actual_sender = upload_target["sender"]
                 client = upload_target["client"]
                 parse_mode = upload_target["parse_mode"]
                 sent_id = None
+                bot_size_limit_hit = False
+                thumbnail_path = await _download_media_thumbnail(app, msg, msg_type) if actual_sender == "bot" and msg_type in {"video", "document"} else None
 
                 for _ in range(3):
                     if sync_state["stop_requested"]:
                         break
                     try:
-                        sync_state["current_text"] = f"上传中... [{upload_target['label']}]"
-                        media_arg = FSInputFile(file_path) if actual_sender == "bot" else file_path
-                        sent = await safe_execute(
-                            dynamic_send(
+                        file_label = format_upload_label(msg_type, file_path)
+                        tracker = UploadProgressTracker(f"上传中 [{upload_target['label']}]", file_size)
+                        media_arg = ProgressFSInputFile(file_path, tracker, file_label) if actual_sender == "bot" else file_path
+                        thumbnail_arg = FSInputFile(thumbnail_path) if actual_sender == "bot" and thumbnail_path and os.path.exists(thumbnail_path) else thumbnail_path
+                        sent = await _execute_with_clone_retry(
+                            lambda: dynamic_send(
                                 client,
                                 msg_type,
                                 target_id,
@@ -199,8 +316,10 @@ async def sync_single_message(mode, sender, app, bot, source_id, target_id, msg,
                                 parse_mode,
                                 reply_to_message_id=reply_to_id,
                                 quote_data=quote_data if reply_to_id else None,
+                                progress=build_pyro_progress_callback(tracker, file_label, total_bytes=file_size) if actual_sender != "bot" else None,
+                                thumbnail=thumbnail_arg,
                             ),
-                            sync_state,
+                            action_label=f"单条媒体 {msg.id}",
                         )
                         sent_id = sent.message_id if actual_sender == "bot" else sent.id
                         if actual_sender == "bot":
@@ -209,17 +328,41 @@ async def sync_single_message(mode, sender, app, bot, source_id, target_id, msg,
                     except Exception as exc:
                         if "STOP_REQUESTED" in str(exc):
                             raise
+                        if actual_sender == "bot" and _is_request_entity_too_large(exc):
+                            bot_size_limit_hit = True
+                            break
+                        retry_after = _parse_retry_after_seconds(exc)
+                        if actual_sender == "bot" and retry_after is not None:
+                            await bot_engine.mark_upload_bot_cooldown(client, retry_after + 1, f"CLONE 单条消息ID:{msg.id}")
+                            upload_target = await safe_execute(
+                                resolve_clone_upload_target(
+                                    sender,
+                                    app,
+                                    [file_size],
+                                    allow_user_fallback=_clone_should_fallback_to_user(sender, clone_fallback_to_user),
+                                    wait_for_available_bot=not _clone_should_fallback_to_user(sender, clone_fallback_to_user),
+                                ),
+                                sync_state,
+                            )
+                            actual_sender = upload_target["sender"]
+                            client = upload_target["client"]
+                            parse_mode = upload_target["parse_mode"]
+                            if actual_sender == "user":
+                                await db.add_msg_log("BOT_FALLBACK", f"原始:[{source_id}] 消息ID:{msg.id} | Bot 频控，已切换辅助账号继续发送")
+                            continue
                         await asyncio.sleep(2)
 
-                if sent_id is None and sender == "bot" and actual_sender == "bot":
-                    await db.add_msg_log("BOT_FALLBACK", f"原始:[{source_id}] 消息ID:{msg.id} | {upload_target['label']} 上传失败，回退辅助账号重传")
+                if sent_id is None and _clone_should_fallback_to_user(sender, clone_fallback_to_user) and actual_sender == "bot":
+                    fallback_reason = "Bot 上传体积超限，回退辅助账号重传" if bot_size_limit_hit else f"{upload_target['label']} 上传失败，回退辅助账号重传"
+                    await db.add_msg_log("BOT_FALLBACK", f"原始:[{source_id}] 消息ID:{msg.id} | {fallback_reason}")
                     for _ in range(3):
                         if sync_state["stop_requested"]:
                             break
                         try:
-                            sync_state["current_text"] = "上传中... [辅助账号回退]"
-                            sent = await safe_execute(
-                                dynamic_send(
+                            file_label = format_upload_label(msg_type, file_path)
+                            tracker = UploadProgressTracker("上传中 [辅助账号回退]", file_size)
+                            sent = await _execute_with_clone_retry(
+                                lambda: dynamic_send(
                                     app,
                                     msg_type,
                                     target_id,
@@ -228,8 +371,10 @@ async def sync_single_message(mode, sender, app, bot, source_id, target_id, msg,
                                     ParseMode.HTML,
                                     reply_to_message_id=reply_to_id,
                                     quote_data=quote_data if reply_to_id else None,
+                                    progress=build_pyro_progress_callback(tracker, file_label, total_bytes=file_size),
+                                    thumbnail=thumbnail_path,
                                 ),
-                                sync_state,
+                                action_label=f"单条媒体辅助回退 {msg.id}",
                             )
                             sent_id = sent.id
                             break
@@ -242,6 +387,11 @@ async def sync_single_message(mode, sender, app, bot, source_id, target_id, msg,
                     os.remove(file_path)
                 except Exception:
                     pass
+                if thumbnail_path:
+                    try:
+                        os.remove(thumbnail_path)
+                    except Exception:
+                        pass
                 if sent_id is None:
                     return
 
@@ -250,6 +400,8 @@ async def sync_single_message(mode, sender, app, bot, source_id, target_id, msg,
             await db.add_msg_log("CLONE_QUOTE_SEND", f"原始:[{source_id}] 消息ID:{msg.id} | 已按引用回复发送")
         await db.add_msg_log(f"{mode.upper()}_SEND", f"原始:[{source_id}] 消息ID:{msg.id} | 目标:[{target_id}] 新ID:{sent_id} | 同步成功")
     except Exception as exc:
+        if mode == "api" and _is_chat_forwards_restricted(exc):
+            raise RuntimeError("该频道不支持转发，请使用下载重传") from exc
         if sync_state["stop_requested"]:
             return
         await log_sync_error(f"单条同步异常 ID {msg.id}", exc)
@@ -257,7 +409,7 @@ async def sync_single_message(mode, sender, app, bot, source_id, target_id, msg,
     await asyncio.sleep(safe_delay)
 
 
-async def sync_media_group(mode, sender, app, bot, source_id, target_id, group, safe_delay, force_send, hash_perturb=False):
+async def sync_media_group(mode, sender, app, bot, source_id, target_id, group, safe_delay, force_send, hash_perturb=False, clone_fallback_to_user=True):
     if await update_state_and_check_skip(source_id, target_id, group[0].id, "[媒体组]", force_send=force_send):
         return
 
@@ -311,10 +463,12 @@ async def sync_media_group(mode, sender, app, bot, source_id, target_id, group, 
             except Exception as exc:
                 if "STOP_REQUESTED" in str(exc):
                     raise
+                if _is_chat_forwards_restricted(exc):
+                    raise RuntimeError("该频道不支持转发，请使用下载重传") from exc
     else:
         downloaded_files = []
         dl_success = False
-        for _ in range(3):
+        for attempt in range(1, 4):
             if sync_state["stop_requested"]:
                 break
             try:
@@ -322,10 +476,11 @@ async def sync_media_group(mode, sender, app, bot, source_id, target_id, group, 
 
                 async def dl_album_item(m_item, idx):
                     async with sem:
+                        item_type, _ = get_msg_meta(m_item, mode)
                         return await safe_execute(
                             app.download_media(
                                 m_item,
-                                file_name=f"{TEMP_DIR}/",
+                                file_name=_build_temp_download_path(m_item, item_type),
                                 progress=create_progress_callback(f"并发下载 [{idx}]", sync_state),
                             ),
                             sync_state,
@@ -336,17 +491,46 @@ async def sync_media_group(mode, sender, app, bot, source_id, target_id, group, 
                     return_exceptions=True,
                 )
                 if any(isinstance(result, Exception) for result in results):
+                    retry_waits = []
+                    failure_details = []
+                    for item, result in zip(group, results):
+                        if isinstance(result, Exception):
+                            wait_seconds = _parse_retry_after_seconds(result)
+                            if wait_seconds is not None:
+                                retry_waits.append(wait_seconds)
+                            failure_details.append(f"消息ID:{item.id} -> {result}")
+                        elif isinstance(result, str):
+                            try:
+                                os.remove(result)
+                            except Exception:
+                                pass
                     if any("STOP_REQUESTED" in str(result) for result in results):
                         sync_state["stop_requested"] = True
-                    await asyncio.sleep(2)
+                    elif retry_waits:
+                        wait_seconds = max(retry_waits) + 1
+                        sync_state["current_text"] = f"等待重试\n媒体组下载触发频控，需等待 {wait_seconds} 秒"
+                        await db.add_msg_log(
+                            "CLONE_GROUP_DOWNLOAD_WAIT",
+                            f"组首ID:{group[0].id} | 下载阶段遇到频控，需等待 {wait_seconds} 秒后重试；切换发送身份无效，建议稍后继续",
+                        )
+                        await asyncio.sleep(wait_seconds)
+                    else:
+                        await db.add_msg_log(
+                            "CLONE_GROUP_DOWNLOAD_RETRY",
+                            f"组首ID:{group[0].id} | 第 {attempt}/3 次下载失败 | " + " ; ".join(failure_details[:3]),
+                        )
+                        await asyncio.sleep(2)
                     continue
                 downloaded_files = [(item, path) for item, path in zip(group, results) if isinstance(path, str)]
                 dl_success = True
                 break
-            except Exception:
-                pass
+            except Exception as exc:
+                await db.add_msg_log("CLONE_GROUP_DOWNLOAD_RETRY", f"组首ID:{group[0].id} | 第 {attempt}/3 次下载异常 | {exc}")
+                await asyncio.sleep(2)
 
         if not dl_success or sync_state["stop_requested"]:
+            if not sync_state["stop_requested"] and not dl_success:
+                await log_sync_error(f"媒体组下载失败 组首ID {group[0].id}", RuntimeError("媒体组下载重试 3 次后仍失败"))
             for _, path in downloaded_files:
                 try:
                     os.remove(path)
@@ -368,23 +552,54 @@ async def sync_media_group(mode, sender, app, bot, source_id, target_id, group, 
                     await db.add_msg_log("HASH_PERTURB_SKIP", f"消息ID:{item.id} | 类型:{item_type} | {describe_hash_perturb_reason('disabled')}")
 
         file_sizes = [os.path.getsize(path) for _, path in downloaded_files]
-        upload_target = await safe_execute(resolve_clone_upload_target(sender, app, file_sizes), sync_state)
+        upload_target = await safe_execute(
+            resolve_clone_upload_target(
+                sender,
+                app,
+                file_sizes,
+                allow_user_fallback=_clone_should_fallback_to_user(sender, clone_fallback_to_user),
+            ),
+            sync_state,
+        )
         actual_sender = upload_target["sender"]
         cls_map = AIO_MEDIA_CLS if actual_sender == "bot" else PYRO_MEDIA_CLS
         client = upload_target["client"]
         parse_mode = upload_target["parse_mode"]
+        sync_state["current_text"] = f"准备上传媒体组 [{upload_target['label']}]"
+        thumbnail_paths = {}
+        for item, _ in downloaded_files:
+            item_type, _ = get_msg_meta(item, mode)
+            if item_type in {"video", "document"}:
+                thumbnail_paths[item.id] = await _download_media_thumbnail(app, item, item_type)
 
         sent_group_success = False
+        bot_size_limit_hit = False
         for _ in range(3):
             if sync_state["stop_requested"]:
                 break
             try:
-                sync_state["current_text"] = f"上传相册... [{upload_target['label']}]"
+                tracker = UploadProgressTracker(f"上传媒体组 [{upload_target['label']}]", sum(file_sizes))
                 media_list = []
-                for (item, path), caption_html in zip(downloaded_files, rewritten_captions):
+                for index, ((item, path), caption_html) in enumerate(zip(downloaded_files, rewritten_captions), start=1):
                     item_type, _ = get_msg_meta(item, mode)
                     media_cls = cls_map.get(item_type, cls_map["document"])
-                    media_list.append(media_cls(media=FSInputFile(path) if actual_sender == "bot" else path, caption=caption_html, parse_mode=parse_mode))
+                    file_label = format_upload_label(item_type, path, index=index, total=len(downloaded_files))
+                    media_input = ProgressFSInputFile(path, tracker, file_label) if actual_sender == "bot" else path
+                    if actual_sender == "bot":
+                        thumbnail_path = thumbnail_paths.get(item.id)
+                        thumbnail_input = FSInputFile(thumbnail_path) if thumbnail_path and os.path.exists(thumbnail_path) else None
+                        media_kwargs = {"media": media_input, "caption": caption_html, "parse_mode": parse_mode}
+                        if item_type in {"video", "document"} and thumbnail_input is not None:
+                            media_kwargs["thumbnail"] = thumbnail_input
+                        if item_type == "video":
+                            media_kwargs["supports_streaming"] = True
+                        media_list.append(media_cls(**media_kwargs))
+                    else:
+                        thumbnail_path = thumbnail_paths.get(item.id)
+                        media_kwargs = {"media": media_input, "caption": caption_html, "parse_mode": parse_mode}
+                        if item_type in {"video", "document"} and thumbnail_path and os.path.exists(thumbnail_path):
+                            media_kwargs["thumb"] = thumbnail_path
+                        media_list.append(media_cls(**media_kwargs))
                 send_kwargs = {"chat_id": target_id, "media": media_list}
                 if reply_to_id:
                     send_kwargs["reply_to_message_id"] = reply_to_id
@@ -400,7 +615,16 @@ async def sync_media_group(mode, sender, app, bot, source_id, target_id, group, 
                         send_kwargs["quote_text"] = quote_data["text"]
                         if quote_data.get("entities"):
                             send_kwargs["quote_entities"] = quote_data["entities"]
-                sent_msgs = await safe_execute(client.send_media_group(**send_kwargs), sync_state)
+                if actual_sender != "bot":
+                    send_kwargs["progress"] = build_pyro_progress_callback(
+                        tracker,
+                        f"上传媒体组: {len(downloaded_files)} 项",
+                        total_bytes=sum(file_sizes),
+                    )
+                sent_msgs = await _execute_with_clone_retry(
+                    lambda: client.send_media_group(**send_kwargs),
+                    action_label=f"媒体组 {group[0].id}",
+                )
                 for orig_m, new_m in zip(group, sent_msgs):
                     await record_success(source_id, target_id, orig_m.id, new_m.message_id if actual_sender == "bot" else new_m.id, force_send=force_send)
                 if actual_sender == "bot":
@@ -414,16 +638,45 @@ async def sync_media_group(mode, sender, app, bot, source_id, target_id, group, 
             except Exception as exc:
                 if "STOP_REQUESTED" in str(exc):
                     raise
+                if actual_sender == "bot" and _is_request_entity_too_large(exc):
+                    bot_size_limit_hit = True
+                    break
+                retry_after = _parse_retry_after_seconds(exc)
+                if actual_sender == "bot" and retry_after is not None:
+                    await bot_engine.mark_upload_bot_cooldown(client, retry_after + 1, f"CLONE 媒体组首ID:{group[0].id}")
+                    upload_target = await safe_execute(
+                        resolve_clone_upload_target(
+                            sender,
+                            app,
+                            file_sizes,
+                            allow_user_fallback=_clone_should_fallback_to_user(sender, clone_fallback_to_user),
+                            wait_for_available_bot=not _clone_should_fallback_to_user(sender, clone_fallback_to_user),
+                        ),
+                        sync_state,
+                    )
+                    actual_sender = upload_target["sender"]
+                    cls_map = AIO_MEDIA_CLS if actual_sender == "bot" else PYRO_MEDIA_CLS
+                    client = upload_target["client"]
+                    parse_mode = upload_target["parse_mode"]
+                    if actual_sender == "user":
+                        await db.add_msg_log("BOT_FALLBACK", f"原始:[{source_id}] 组首ID:{group[0].id} | Bot 频控，已切换辅助账号继续发送")
+                    continue
                 await asyncio.sleep(2)
 
-        if not sync_state["stop_requested"] and sender == "bot" and actual_sender == "bot" and not sent_group_success:
+        if not sync_state["stop_requested"] and _clone_should_fallback_to_user(sender, clone_fallback_to_user) and actual_sender == "bot" and not sent_group_success:
             first_id = group[0].id if group else 0
-            await db.add_msg_log("BOT_FALLBACK", f"原始:[{source_id}] 组首ID:{first_id} | {upload_target['label']} 上传失败，回退辅助账号重传")
+            fallback_reason = "Bot 上传体积超限，回退辅助账号重传" if bot_size_limit_hit else f"{upload_target['label']} 上传失败，回退辅助账号重传"
+            await db.add_msg_log("BOT_FALLBACK", f"原始:[{source_id}] 组首ID:{first_id} | {fallback_reason}")
+            tracker = UploadProgressTracker("上传媒体组 [辅助账号回退]", sum(file_sizes))
             media_list = []
             for (item, path), caption_html in zip(downloaded_files, rewritten_captions):
                 item_type, _ = get_msg_meta(item, mode)
                 media_cls = PYRO_MEDIA_CLS.get(item_type, PYRO_MEDIA_CLS["document"])
-                media_list.append(media_cls(media=path, caption=caption_html, parse_mode=ParseMode.HTML))
+                thumbnail_path = thumbnail_paths.get(item.id)
+                media_kwargs = {"media": path, "caption": caption_html, "parse_mode": ParseMode.HTML}
+                if item_type in {"video", "document"} and thumbnail_path and os.path.exists(thumbnail_path):
+                    media_kwargs["thumb"] = thumbnail_path
+                media_list.append(media_cls(**media_kwargs))
             send_kwargs = {"chat_id": target_id, "media": media_list}
             if reply_to_id:
                 send_kwargs["reply_to_message_id"] = reply_to_id
@@ -431,7 +684,15 @@ async def sync_media_group(mode, sender, app, bot, source_id, target_id, group, 
                 send_kwargs["quote_text"] = quote_data["text"]
                 if quote_data.get("entities"):
                     send_kwargs["quote_entities"] = quote_data["entities"]
-            sent_msgs = await safe_execute(app.send_media_group(**send_kwargs), sync_state)
+            send_kwargs["progress"] = build_pyro_progress_callback(
+                tracker,
+                f"上传媒体组: {len(downloaded_files)} 项",
+                total_bytes=sum(file_sizes),
+            )
+            sent_msgs = await _execute_with_clone_retry(
+                lambda: app.send_media_group(**send_kwargs),
+                action_label=f"媒体组辅助回退 {first_id}",
+            )
             for orig_m, new_m in zip(group, sent_msgs):
                 await record_success(source_id, target_id, orig_m.id, new_m.id, force_send=force_send)
 
@@ -440,6 +701,12 @@ async def sync_media_group(mode, sender, app, bot, source_id, target_id, group, 
                 os.remove(path)
             except Exception:
                 pass
+        for thumbnail_path in thumbnail_paths.values():
+            if thumbnail_path:
+                try:
+                    os.remove(thumbnail_path)
+                except Exception:
+                    pass
 
     await asyncio.sleep(safe_delay)
 
@@ -475,16 +742,17 @@ async def process_master_sync(
     json_path: str,
     force_send: bool = False,
     json_source_username: str = "",
+    json_media_group_window_seconds: int = 3,
     hash_perturb: bool = False,
+    clone_fallback_to_user: bool = True,
 ):
     safe_delay = max(0.5, float(delay))
     if mode == "api":
         sender = "user"
-    elif mode == "json":
-        sender = "bot"
 
     start_sync_session(
         mode,
+        sender,
         source_id_raw,
         target_id_raw,
         safe_delay,
@@ -494,6 +762,7 @@ async def process_master_sync(
         force_send,
         json_source_username,
         hash_perturb,
+        clone_fallback_to_user,
     )
     settings = await db.get_all_settings()
 
@@ -509,6 +778,7 @@ async def process_master_sync(
         await clear_temp_dir_files()
         await db.add_log("INFO", "已清空 temp，准备下载")
 
+    final_status = "completed"
     try:
         if mode in ["api", "clone"]:
             app, bot = bot_engine.pyro_user_app, bot_engine.aiogram_bot
@@ -542,15 +812,58 @@ async def process_master_sync(
                     if sync_state["stop_requested"]:
                         break
                     if len(group) == 1:
-                        await sync_single_message(mode, sender, app, bot, source_id, target_id, group[0], safe_delay, force_send, hash_perturb=hash_perturb)
+                        await sync_single_message(
+                            mode,
+                            sender,
+                            app,
+                            bot,
+                            source_id,
+                            target_id,
+                            group[0],
+                            safe_delay,
+                            force_send,
+                            hash_perturb=hash_perturb,
+                            clone_fallback_to_user=clone_fallback_to_user,
+                        )
                     else:
-                        await sync_media_group(mode, sender, app, bot, source_id, target_id, group, safe_delay, force_send, hash_perturb=hash_perturb)
+                        await sync_media_group(
+                            mode,
+                            sender,
+                            app,
+                            bot,
+                            source_id,
+                            target_id,
+                            group,
+                            safe_delay,
+                            force_send,
+                            hash_perturb=hash_perturb,
+                            clone_fallback_to_user=clone_fallback_to_user,
+                        )
         else:
-            await process_json_sync(target_id_raw, json_path, safe_delay, force_send, json_source_username=json_source_username)
+            await process_json_sync(
+                sender,
+                target_id_raw,
+                json_path,
+                safe_delay,
+                force_send,
+                json_source_username=json_source_username,
+                media_group_window_seconds=json_media_group_window_seconds,
+                clone_fallback_to_user=clone_fallback_to_user,
+            )
 
     except asyncio.CancelledError:
-        pass
+        final_status = "stopped"
     except Exception as exc:
+        final_status = "failed"
         await log_sync_error("同步中断", exc)
     finally:
+        if final_status == "failed":
+            await db.add_log("INFO", f"任务结束：{sync_state.get('mode', mode.upper())} 异常中止")
+        elif sync_state.get("stop_requested") or final_status == "stopped":
+            await db.add_log("INFO", f"任务结束：{sync_state.get('mode', mode.upper())} 已停止")
+        else:
+            await db.add_log(
+                "INFO",
+                f"任务运行完毕：{sync_state.get('mode', mode.upper())} | 已处理 {sync_state.get('current', 0)} / {sync_state.get('total', 0)} | 跳过 {sync_state.get('skipped', 0)}",
+            )
         finish_sync_session()

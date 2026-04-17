@@ -12,7 +12,25 @@ from app_paths import database_file, ensure_runtime_dirs
 DB_FILE = str(database_file())
 LOG_RETENTION_LIMIT = 100
 _db_conn: aiosqlite.Connection | None = None
-_db_lock = asyncio.Lock()
+_db_lock: asyncio.Lock | None = None
+_db_loop: asyncio.AbstractEventLoop | None = None
+
+
+async def _ensure_db_context() -> asyncio.Lock:
+    global _db_lock, _db_loop, _db_conn
+    current_loop = asyncio.get_running_loop()
+    if _db_lock is None:
+        _db_lock = asyncio.Lock()
+        _db_loop = current_loop
+        return _db_lock
+    if _db_loop is not current_loop:
+        old_conn = _db_conn
+        _db_conn = None
+        _db_lock = asyncio.Lock()
+        _db_loop = current_loop
+        if old_conn is not None:
+            await old_conn.close()
+    return _db_lock
 
 
 async def _configure_connection(conn: aiosqlite.Connection) -> aiosqlite.Connection:
@@ -25,7 +43,7 @@ async def _configure_connection(conn: aiosqlite.Connection) -> aiosqlite.Connect
 async def _get_connection() -> aiosqlite.Connection:
     global _db_conn
     ensure_runtime_dirs()
-    async with _db_lock:
+    async with await _ensure_db_context():
         if _db_conn is None:
             _db_conn = await aiosqlite.connect(DB_FILE)
             await _configure_connection(_db_conn)
@@ -34,7 +52,7 @@ async def _get_connection() -> aiosqlite.Connection:
 
 async def close_db() -> None:
     global _db_conn
-    async with _db_lock:
+    async with await _ensure_db_context():
         if _db_conn is not None:
             await _db_conn.close()
             _db_conn = None
@@ -46,7 +64,7 @@ async def _run_in_db(
     commit: bool = False,
 ):
     conn = await _get_connection()
-    async with _db_lock:
+    async with await _ensure_db_context():
         result = await action(conn)
         if commit:
             await conn.commit()
@@ -208,7 +226,7 @@ async def _seed_default_settings(conn: aiosqlite.Connection) -> None:
 
 async def init_db():
     conn = await _get_connection()
-    async with _db_lock:
+    async with await _ensure_db_context():
         await _migrate_channel_mappings(conn)
         await _migrate_message_mappings(conn)
         await _ensure_supporting_tables(conn)
