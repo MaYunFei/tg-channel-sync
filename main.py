@@ -21,8 +21,10 @@ from fastapi.staticfiles import StaticFiles
 import bot_engine
 import database as db
 from app_config import get_config, get_setup_status, save_config
-from app_paths import ensure_runtime_dirs, static_dir, temp_dir, version_file
-from sync_engine import process_master_sync, sync_state
+from app_paths import ensure_runtime_dirs, static_dir, temp_dir
+from services.sync_services import resolve_chat_id
+from services.version_service import GITHUB_REPO, get_local_version, get_remote_version_info, is_version_at_least
+from sync_worker import process_master_sync, sync_state
 
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
@@ -48,9 +50,6 @@ RESTART_REQUESTED = False
 STOP_REQUESTED = False
 _BROWSER_OPEN_LOCK = threading.Lock()
 _BROWSER_OPENED_URLS: set[str] = set()
-GITHUB_REPO = "RRHTY/tg-channel-sync"
-
-
 def refresh_app_info(bot_info=None, user_info=None):
     if bot_info:
         app_info_cache["bot"].update(bot_info)
@@ -73,6 +72,7 @@ async def _force_cleanup():
 
     await bot_engine.close_user_client()
     await bot_engine.close_bot_client()
+    await db.close_db()
 
 
 def _request_server_exit():
@@ -190,104 +190,11 @@ async def get_app_info():
     return app_info_cache
 
 
-def _normalize_version_tag(value: str) -> str:
-    return str(value or "").strip().lower().lstrip("v")
-
-
-def _version_key(value: str):
-    normalized = _normalize_version_tag(value)
-    parts = []
-    for chunk in normalized.replace("-", ".").split("."):
-        if not chunk:
-            continue
-        if chunk.isdigit():
-            parts.append((0, int(chunk)))
-            continue
-        number_prefix = ""
-        for ch in chunk:
-            if ch.isdigit():
-                number_prefix += ch
-            else:
-                break
-        if number_prefix:
-            parts.append((0, int(number_prefix)))
-            suffix = chunk[len(number_prefix):]
-            if suffix:
-                parts.append((1, suffix))
-        else:
-            parts.append((1, chunk))
-    return tuple(parts)
-
-
-def _has_valid_version(value: str) -> bool:
-    normalized = _normalize_version_tag(value)
-    if not normalized:
-        return False
-    first = normalized.split(".", 1)[0].split("-", 1)[0]
-    return first.isdigit()
-
-
-def _is_version_at_least(current_version: str, latest_version: str) -> bool:
-    if not latest_version or not _has_valid_version(current_version) or not _has_valid_version(latest_version):
-        return False
-    return _version_key(current_version) >= _version_key(latest_version)
-
-
-def _get_local_version() -> str:
-    try:
-        version = version_file().read_text(encoding="utf-8").strip()
-        if version:
-            return version
-    except Exception:
-        pass
-    return "unknown"
-
-
-def _fetch_github_json(url: str):
-    request = urllib.request.Request(
-        url,
-        headers={
-            "Accept": "application/vnd.github+json",
-            "User-Agent": "tg-channel-sync-version-check",
-        },
-    )
-    with urllib.request.urlopen(request, timeout=10) as response:
-        return json.loads(response.read().decode("utf-8"))
-
-
-def _get_remote_version_info() -> dict:
-    latest_release_url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
-    tags_url = f"https://api.github.com/repos/{GITHUB_REPO}/tags?per_page=1"
-    try:
-        release = _fetch_github_json(latest_release_url)
-        tag_name = str(release.get("tag_name") or "").strip()
-        if tag_name:
-            return {
-                "latest_version": tag_name,
-                "source": "release",
-                "url": release.get("html_url") or f"https://github.com/{GITHUB_REPO}/releases/latest",
-            }
-    except Exception:
-        pass
-
-    tags = _fetch_github_json(tags_url)
-    if isinstance(tags, list) and tags:
-        tag_name = str(tags[0].get("name") or "").strip()
-        if tag_name:
-            return {
-                "latest_version": tag_name,
-                "source": "tag",
-                "url": f"https://github.com/{GITHUB_REPO}/tags",
-            }
-
-    return {"latest_version": "", "source": "", "url": f"https://github.com/{GITHUB_REPO}"}
-
-
 @app.get("/api/version")
 async def get_version_info():
-    current_version = _get_local_version()
+    current_version = get_local_version()
     try:
-        remote = await asyncio.to_thread(_get_remote_version_info)
+        remote = await asyncio.to_thread(get_remote_version_info)
         latest_version = remote.get("latest_version", "")
         return {
             "status": "success",
@@ -296,7 +203,7 @@ async def get_version_info():
             "latest_version": latest_version,
             "source": remote.get("source", ""),
             "url": remote.get("url", f"https://github.com/{GITHUB_REPO}"),
-            "up_to_date": _is_version_at_least(current_version, latest_version),
+            "up_to_date": is_version_at_least(current_version, latest_version),
         }
     except Exception as exc:
         return {
@@ -427,6 +334,30 @@ async def sse_stream(request: Request):
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
+@app.get("/api/logs/system")
+async def get_system_logs():
+    rows = await db.get_recent_sys_logs()
+    return [{"id": row[0], "time": row[1], "level": row[2], "msg": row[3]} for row in reversed(rows)]
+
+
+@app.delete("/api/logs/system")
+async def clear_system_logs():
+    await db.clear_sys_logs()
+    return {"status": "success", "message": "系统日志已清理"}
+
+
+@app.get("/api/logs/message")
+async def get_message_logs():
+    rows = await db.get_recent_msg_logs()
+    return [{"id": row[0], "time": row[1], "action": row[2], "detail": row[3]} for row in reversed(rows)]
+
+
+@app.delete("/api/logs/message")
+async def clear_message_logs():
+    await db.clear_msg_logs()
+    return {"status": "success", "message": "消息日志已清理"}
+
+
 @app.post("/api/server/stop")
 async def stop_server():
     async def shutdown():
@@ -461,23 +392,6 @@ async def restart_server():
     return {"status": "success", "message": "服务端正在重载配置并重启..."}
 
 
-async def resolve_chat_id(chat_ref: str) -> int:
-    if bot_engine.aiogram_bot is None:
-        raise ValueError("BOT 未配置或未连接，无法解析频道")
-
-    chat_ref = str(chat_ref).strip()
-    if chat_ref.lstrip("-").isdigit():
-        return int(chat_ref)
-    if "t.me/" in chat_ref:
-        chat_ref = "@" + chat_ref.split("/")[-1].split("?")[0]
-    if not chat_ref.startswith("@"):
-        chat_ref = "@" + chat_ref
-    try:
-        return (await bot_engine.aiogram_bot.get_chat(chat_ref)).id
-    except Exception as exc:
-        raise ValueError(f"无法解析频道 {chat_ref}: {exc}")
-
-
 @app.get("/api/mappings")
 async def get_mappings():
     mappings = [{"source_id": row[0], "target_id": row[1]} for row in await db.get_all_channel_mappings()]
@@ -495,8 +409,8 @@ async def get_mappings():
 @app.post("/api/mappings")
 async def add_mapping(source_id: str = Form(...), target_id: str = Form(...)):
     try:
-        src = await resolve_chat_id(source_id)
-        tgt = await resolve_chat_id(target_id)
+        src = await resolve_chat_id(bot_engine.aiogram_bot, source_id)
+        tgt = await resolve_chat_id(bot_engine.aiogram_bot, target_id)
         await db.add_channel_mapping(src, tgt)
         await db.add_sys_log("INFO", f"添加频道映射: {src} -> {tgt}")
         return {"status": "success", "message": "映射规则添加成功"}
@@ -505,8 +419,8 @@ async def add_mapping(source_id: str = Form(...), target_id: str = Form(...)):
 
 
 @app.delete("/api/mappings/{source_id}")
-async def delete_mapping(source_id: int):
-    await db.delete_channel_mapping(source_id)
+async def delete_mapping(source_id: int, target_id: int | None = None):
+    await db.delete_channel_mapping(source_id, target_id=target_id)
     return {"status": "success", "message": "规则已删除"}
 
 

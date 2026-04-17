@@ -43,6 +43,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
 }
 
+_CONFIG_CACHE: dict[str, Any] | None = None
+
 
 def _merge_dict(base: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
     merged = deepcopy(base)
@@ -96,31 +98,42 @@ def _normalize_config(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def load_config() -> dict[str, Any]:
+    global _CONFIG_CACHE
     ensure_runtime_dirs()
     cfg_path = config_file()
     if not cfg_path.exists():
         config = deepcopy(DEFAULT_CONFIG)
         save_config(config)
-        return config
+        return deepcopy(config)
 
     try:
         config = json.loads(cfg_path.read_text(encoding="utf-8"))
     except Exception:
         config = deepcopy(DEFAULT_CONFIG)
     config = _normalize_config(config)
-    save_config(config)
-    return config
+    _CONFIG_CACHE = deepcopy(config)
+    return deepcopy(config)
 
 
 def save_config(config: dict[str, Any]) -> dict[str, Any]:
+    global _CONFIG_CACHE
     ensure_runtime_dirs()
     normalized = _normalize_config(config)
     config_file().write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
-    return normalized
+    _CONFIG_CACHE = deepcopy(normalized)
+    return deepcopy(normalized)
 
 
 def get_config() -> dict[str, Any]:
-    return load_config()
+    global _CONFIG_CACHE
+    if _CONFIG_CACHE is None:
+        _CONFIG_CACHE = load_config()
+    return deepcopy(_CONFIG_CACHE)
+
+
+def clear_config_cache() -> None:
+    global _CONFIG_CACHE
+    _CONFIG_CACHE = None
 
 
 def get_setup_status(config: dict[str, Any] | None = None) -> dict[str, Any]:

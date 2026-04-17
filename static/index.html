@@ -69,7 +69,7 @@
                 <global-filters :settings="settings" :rules="filterRules" :new-rule="newFilter" @save-settings="saveGlobalSettings" @add-rule="addFilter" @del-rule="deleteFilter"></global-filters>
             </div>
         </div>
-        <log-viewer class="mt-6" :sys-logs="sysLogs" :msg-logs="msgLogs"></log-viewer>
+        <log-viewer class="mt-6" :sys-logs="sysLogs" :msg-logs="msgLogs" @clear-sys-logs="clearSystemLogs" @clear-msg-logs="clearMessageLogs"></log-viewer>
     </template>
 
     <settings-panel v-else :config="configForm" :saving="configSaving" :user-auth="userAuth" :auth-submitting="authSubmitting" :send-code-cooldown="sendCodeCooldown" @save-config="saveSettingsPage" @save-restart="saveAndRestart" @send-code="sendUserCode" @verify-code="verifyUserCode" @submit-password="submitUserPassword" @cancel-auth="cancelUserAuth" @switch-account="switchUserAccount"></settings-panel>

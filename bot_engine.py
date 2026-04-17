@@ -1,9 +1,7 @@
 ﻿import asyncio
 import logging
-import re
 import time
 from math import ceil
-from pathlib import Path
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
@@ -16,6 +14,12 @@ from pyrogram.errors import SessionPasswordNeeded
 import database as db
 from app_config import get_config
 from app_paths import pyrogram_user_session_base
+from services.sync_services import (
+    build_link_rewrite_context,
+    get_quote_payload,
+    resolve_reply_for_forward,
+    rewrite_message_links,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -249,84 +253,14 @@ async def is_type_allowed(msg_type: str) -> bool:
     return settings.get(key_map.get(msg_type, "sync_text"), "1") == "1"
 
 
-async def resolve_reply_for_forward(source_id: int, current_msg_id: int, reply_source_msg_id: int | None):
-    if not reply_source_msg_id:
-        return None
-    target_reply_id = await db.get_target_msg_id(source_id, reply_source_msg_id)
-    if target_reply_id:
-        await db.add_msg_log("REPLY_MAP", f"source={source_id} message={current_msg_id} reply_target={target_reply_id}")
-    else:
-        await db.add_msg_log("REPLY_FALLBACK", f"source={source_id} message={current_msg_id} missing_reply_source={reply_source_msg_id}")
-    return target_reply_id
-
-
-def get_quote_payload(message: Message):
-    quote = getattr(message, "quote", None)
-    if not quote or not getattr(quote, "text", None):
-        return None
-    return {
-        "text": quote.text,
-        "position": getattr(quote, "position", None),
-        "entities": getattr(quote, "entities", None),
-    }
-
-
-async def rewrite_message_links(text_html: str, source_id: int, target_id: int):
-    if not text_html:
-        return text_html
-
-    try:
-        source_chat = await aiogram_bot.get_chat(source_id)
-        target_chat = await aiogram_bot.get_chat(target_id)
-    except Exception:
-        source_chat = None
-        target_chat = None
-
-    source_internal_id = str(abs(source_id)).removeprefix("100")
-    target_internal_id = str(abs(target_id)).removeprefix("100")
-    updated_html = text_html
-    rewrite_count = 0
-
-    async def replace_pattern(pattern, replacement_prefix):
-        nonlocal updated_html, rewrite_count
-        for match in list(pattern.finditer(updated_html)):
-            source_msg_id = int(match.group("msg_id"))
-            target_msg_id = await db.get_target_msg_id(source_id, source_msg_id)
-            if not target_msg_id:
-                continue
-            original = match.group(0)
-            replaced = f"{match.group('prefix')}{replacement_prefix}/{target_msg_id}{match.group('suffix') or ''}"
-            if original == replaced:
-                continue
-            updated_html = updated_html.replace(original, replaced)
-            rewrite_count += 1
-
-    await replace_pattern(
-        re.compile(rf"(?P<prefix>https?://t\.me/c/{re.escape(source_internal_id)}/)(?P<msg_id>\d+)(?P<suffix>\b)"),
-        f"https://t.me/c/{target_internal_id}",
-    )
-
-    source_username = str(getattr(source_chat, "username", "") or "").lstrip("@")
-    target_username = str(getattr(target_chat, "username", "") or "").lstrip("@")
-    if source_username and target_username:
-        await replace_pattern(
-            re.compile(rf"(?P<prefix>https?://t\.me/{re.escape(source_username)}/)(?P<msg_id>\d+)(?P<suffix>\b)"),
-            f"https://t.me/{target_username}",
-        )
-
-    if rewrite_count:
-        await db.add_msg_log("LINK_REWRITE", f"source={source_id} message_links={rewrite_count}")
-    return updated_html
-
-
 @dp.channel_post()
 async def handle_new_post(message: Message):
     if aiogram_bot is None:
         return
 
     source_id = message.chat.id
-    target_id = await db.get_target_channel(source_id)
-    if not target_id:
+    target_ids = await db.get_target_channels(source_id)
+    if not target_ids:
         return
 
     chat_name = get_chat_name(message.chat)
@@ -343,7 +277,6 @@ async def handle_new_post(message: Message):
             await asyncio.sleep(2)
             if mg_id in media_group_cache:
                 group = sorted(media_group_cache.pop(mg_id), key=lambda item: item.message_id)
-                reply_to_id = await resolve_reply_for_forward(source_id, group[0].message_id, getattr(group[0], "reply_to_message_id", None))
                 quote_data = get_quote_payload(group[0])
                 for item in group:
                     text_html = item.html_text if item.text or item.caption else ""
@@ -355,36 +288,38 @@ async def handle_new_post(message: Message):
 
                 msg_ids = [item.message_id for item in group]
                 await db.add_msg_log("RECV_GROUP", f"[{chat_name}] group_ids={msg_ids}")
-                try:
-                    kwargs = {"chat_id": target_id, "from_chat_id": source_id, "message_ids": msg_ids}
-                    if reply_to_id:
-                        kwargs["reply_to_message_id"] = reply_to_id
-                    if quote_data and reply_to_id:
-                        kwargs["quote_text"] = quote_data["text"]
-                        if quote_data.get("entities"):
-                            kwargs["quote_entities"] = quote_data["entities"]
-                    copied_ids = await aiogram_bot.copy_messages(**kwargs)
-                    for original, copied in zip(group, copied_ids):
-                        await db.save_msg_mapping(source_id, original.message_id, copied.message_id)
-                    if quote_data and reply_to_id:
-                        await db.add_msg_log("QUOTE_GROUP_SEND", f"source={source_id} group_start={group[0].message_id} quote_preserved=1")
-                    await db.add_msg_log("SEND_GROUP", f"source={source_id} target={target_id} ids={msg_ids}")
-                except Exception:
-                    await db.add_msg_log("WARN", "copy_messages failed, fallback to single copy")
-                    for item in group:
-                        try:
-                            kwargs = {"chat_id": target_id, "from_chat_id": source_id, "message_id": item.message_id}
-                            if reply_to_id:
-                                kwargs["reply_to_message_id"] = reply_to_id
-                            if quote_data and reply_to_id:
-                                kwargs["quote_text"] = quote_data["text"]
-                                if quote_data.get("entities"):
-                                    kwargs["quote_entities"] = quote_data["entities"]
-                            copied = await aiogram_bot.copy_message(**kwargs)
-                            await db.save_msg_mapping(source_id, item.message_id, copied.message_id)
-                            await asyncio.sleep(1)
-                        except Exception:
-                            pass
+                for target_id in target_ids:
+                    reply_to_id = await resolve_reply_for_forward(source_id, target_id, group[0].message_id, getattr(group[0], "reply_to_message_id", None))
+                    try:
+                        kwargs = {"chat_id": target_id, "from_chat_id": source_id, "message_ids": msg_ids}
+                        if reply_to_id:
+                            kwargs["reply_to_message_id"] = reply_to_id
+                        if quote_data and reply_to_id:
+                            kwargs["quote_text"] = quote_data["text"]
+                            if quote_data.get("entities"):
+                                kwargs["quote_entities"] = quote_data["entities"]
+                        copied_ids = await aiogram_bot.copy_messages(**kwargs)
+                        for original, copied in zip(group, copied_ids):
+                            await db.save_msg_mapping(source_id, original.message_id, target_id, copied.message_id)
+                        if quote_data and reply_to_id:
+                            await db.add_msg_log("QUOTE_GROUP_SEND", f"source={source_id} target={target_id} group_start={group[0].message_id} quote_preserved=1")
+                        await db.add_msg_log("SEND_GROUP", f"source={source_id} target={target_id} ids={msg_ids}")
+                    except Exception:
+                        await db.add_msg_log("WARN", f"copy_messages failed, fallback to single copy target={target_id}")
+                        for item in group:
+                            try:
+                                kwargs = {"chat_id": target_id, "from_chat_id": source_id, "message_id": item.message_id}
+                                if reply_to_id:
+                                    kwargs["reply_to_message_id"] = reply_to_id
+                                if quote_data and reply_to_id:
+                                    kwargs["quote_text"] = quote_data["text"]
+                                    if quote_data.get("entities"):
+                                        kwargs["quote_entities"] = quote_data["entities"]
+                                copied = await aiogram_bot.copy_message(**kwargs)
+                                await db.save_msg_mapping(source_id, item.message_id, target_id, copied.message_id)
+                                await asyncio.sleep(1)
+                            except Exception:
+                                pass
         else:
             media_group_cache[mg_id].append(message)
         return
@@ -399,47 +334,50 @@ async def handle_new_post(message: Message):
     if should_skip or (not has_media and not new_html.strip()):
         await db.add_msg_log("DROP_REGEX", f"[{chat_name}] id={message.message_id}")
         return
-    new_html = await rewrite_message_links(new_html, source_id, target_id)
+    for target_id in target_ids:
+        link_context = await build_link_rewrite_context(aiogram_bot, source_id, target_id)
+        target_html, rewrite_count = await rewrite_message_links(new_html, source_id, link_context)
+        if rewrite_count:
+            await db.add_msg_log("LINK_REWRITE", f"source={source_id} target={target_id} message_links={rewrite_count}")
+        reply_to_id = await resolve_reply_for_forward(source_id, target_id, message.message_id, getattr(message, "reply_to_message_id", None))
 
-    reply_to_id = await resolve_reply_for_forward(source_id, message.message_id, getattr(message, "reply_to_message_id", None))
-
-    try:
-        if new_html != text_html:
-            kwargs = {"chat_id": target_id, "parse_mode": "HTML"}
-            if not has_media:
-                kwargs["text"] = new_html
+        try:
+            if target_html != text_html:
+                kwargs = {"chat_id": target_id, "parse_mode": "HTML"}
+                if not has_media:
+                    kwargs["text"] = target_html
+                else:
+                    kwargs.update({"from_chat_id": source_id, "message_id": message.message_id, "caption": target_html})
+                if reply_to_id:
+                    kwargs["reply_to_message_id"] = reply_to_id
+                if quote_data and reply_to_id and not has_media:
+                    kwargs.pop("reply_to_message_id", None)
+                    kwargs["reply_parameters"] = ReplyParameters(
+                        message_id=reply_to_id,
+                        quote=quote_data["text"],
+                        quote_position=quote_data.get("position"),
+                    )
+                elif quote_data and reply_to_id:
+                    kwargs["quote_text"] = quote_data["text"]
+                    if quote_data.get("entities"):
+                        kwargs["quote_entities"] = quote_data["entities"]
+                copied = await (aiogram_bot.send_message(**kwargs) if not has_media else aiogram_bot.copy_message(**kwargs))
             else:
-                kwargs.update({"from_chat_id": source_id, "message_id": message.message_id, "caption": new_html})
-            if reply_to_id:
-                kwargs["reply_to_message_id"] = reply_to_id
-            if quote_data and reply_to_id and not has_media:
-                kwargs.pop("reply_to_message_id", None)
-                kwargs["reply_parameters"] = ReplyParameters(
-                    message_id=reply_to_id,
-                    quote=quote_data["text"],
-                    quote_position=quote_data.get("position"),
-                )
-            elif quote_data and reply_to_id:
-                kwargs["quote_text"] = quote_data["text"]
-                if quote_data.get("entities"):
-                    kwargs["quote_entities"] = quote_data["entities"]
-            copied = await (aiogram_bot.send_message(**kwargs) if not has_media else aiogram_bot.copy_message(**kwargs))
-        else:
-            kwargs = {"chat_id": target_id, "from_chat_id": source_id, "message_id": message.message_id}
-            if reply_to_id:
-                kwargs["reply_to_message_id"] = reply_to_id
-            if quote_data and reply_to_id:
-                kwargs["quote_text"] = quote_data["text"]
-                if quote_data.get("entities"):
-                    kwargs["quote_entities"] = quote_data["entities"]
-            copied = await aiogram_bot.copy_message(**kwargs)
+                kwargs = {"chat_id": target_id, "from_chat_id": source_id, "message_id": message.message_id}
+                if reply_to_id:
+                    kwargs["reply_to_message_id"] = reply_to_id
+                if quote_data and reply_to_id:
+                    kwargs["quote_text"] = quote_data["text"]
+                    if quote_data.get("entities"):
+                        kwargs["quote_entities"] = quote_data["entities"]
+                copied = await aiogram_bot.copy_message(**kwargs)
 
-        await db.save_msg_mapping(source_id, message.message_id, copied.message_id)
-        if quote_data and reply_to_id:
-            await db.add_msg_log("QUOTE_SEND", f"source={source_id} message={message.message_id} quote_preserved=1")
-        await db.add_msg_log("SEND", f"source={source_id} message={message.message_id} target={target_id} new={copied.message_id}")
-    except Exception as exc:
-        await db.add_msg_log("ERROR", f"send failed id={message.message_id} error={exc}")
+            await db.save_msg_mapping(source_id, message.message_id, target_id, copied.message_id)
+            if quote_data and reply_to_id:
+                await db.add_msg_log("QUOTE_SEND", f"source={source_id} target={target_id} message={message.message_id} quote_preserved=1")
+            await db.add_msg_log("SEND", f"source={source_id} message={message.message_id} target={target_id} new={copied.message_id}")
+        except Exception as exc:
+            await db.add_msg_log("ERROR", f"send failed id={message.message_id} target={target_id} error={exc}")
 
 
 @dp.edited_channel_post()
@@ -449,9 +387,8 @@ async def handle_edited_post(message: Message):
 
     source_id = message.chat.id
     msg_id = message.message_id
-    target_id = await db.get_target_channel(source_id)
-    target_msg_id = await db.get_target_msg_id(source_id, msg_id) if target_id else None
-    if not target_msg_id:
+    target_mappings = await db.get_all_target_msg_mappings(source_id, msg_id)
+    if not target_mappings:
         return
 
     has_media = get_msg_type(message) != "text"
@@ -459,15 +396,20 @@ async def handle_edited_post(message: Message):
     if should_skip:
         return
 
-    try:
-        kwargs = {"chat_id": target_id, "message_id": target_msg_id, "parse_mode": "HTML"}
-        if message.text:
-            await aiogram_bot.edit_message_text(text=new_html, **kwargs)
-        else:
-            await aiogram_bot.edit_message_caption(caption=new_html, **kwargs)
-        await db.add_msg_log("EDIT", f"source={msg_id} target={target_msg_id}")
-    except Exception:
-        pass
+    for target_id, target_msg_id in target_mappings:
+        link_context = await build_link_rewrite_context(aiogram_bot, source_id, target_id)
+        target_html, rewrite_count = await rewrite_message_links(new_html, source_id, link_context)
+        try:
+            kwargs = {"chat_id": target_id, "message_id": target_msg_id, "parse_mode": "HTML"}
+            if message.text:
+                await aiogram_bot.edit_message_text(text=target_html, **kwargs)
+            else:
+                await aiogram_bot.edit_message_caption(caption=target_html, **kwargs)
+            if rewrite_count:
+                await db.add_msg_log("LINK_REWRITE", f"source={source_id} target={target_id} message_links={rewrite_count}")
+            await db.add_msg_log("EDIT", f"source={msg_id} target={target_id}:{target_msg_id}")
+        except Exception:
+            pass
 
 
 def init_user_client():
