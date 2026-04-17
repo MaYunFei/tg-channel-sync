@@ -584,6 +584,7 @@ async def start_sync(
     start_id: int = Form(0),
     end_id: int = Form(0),
     json_path: str = Form(""),
+    json_source_username: str = Form(""),
     force_send: str = Form("0"),
 ):
     if sync_state["is_syncing"]:
@@ -604,10 +605,11 @@ async def start_sync(
         end_id,
         json_path,
         force_send == "1",
+        json_source_username,
     )
 
     if mode == "json":
-        await db.add_sys_log("INFO", f"启动 JSON 任务 -> {target_id}")
+        await db.add_sys_log("INFO", f"启动 JSON 任务 -> {target_id}" + (f" | 源频道用户名:@{str(json_source_username).lstrip('@')}" if json_source_username else ""))
     else:
         await db.add_sys_log("INFO", f"启动 {mode.upper()} 任务: {source_id} -> {target_id}")
     return {"status": "success", "message": f"启动 {mode.upper()} 任务成功"}

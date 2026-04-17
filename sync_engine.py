@@ -1,6 +1,7 @@
 ﻿import asyncio
 import json
 import os
+import re
 import time
 
 from aiogram.types import FSInputFile
@@ -47,6 +48,7 @@ sync_state = {
     "start_id": "",
     "end_id": "",
     "json_path": "",
+    "json_source_username": "",
     "force_send": False,
 }
 
@@ -85,6 +87,86 @@ def get_quote_payload(msg):
         "position": getattr(quote, "position", None),
         "entities": getattr(quote, "entities", None),
     }
+
+
+async def build_link_rewrite_context(source_id, target_id, source_username_override=None):
+    if bot_engine.aiogram_bot is None:
+        return None
+
+    context = {"source_id": source_id, "target_id": target_id}
+    try:
+        source_chat = await bot_engine.aiogram_bot.get_chat(source_id) if source_id != 0 else None
+        target_chat = await bot_engine.aiogram_bot.get_chat(target_id)
+    except Exception:
+        source_chat = None
+        target_chat = None
+
+    source_username = source_username_override or (getattr(source_chat, "username", None) if source_chat else None)
+    target_username = getattr(target_chat, "username", None) if target_chat else None
+    context["source_username"] = str(source_username).lstrip("@") if source_username else None
+    context["target_username"] = str(target_username).lstrip("@") if target_username else None
+    return context
+
+
+def _replace_msg_link(match, target_channel_ref, mapped_msg_id):
+    prefix = match.group("prefix")
+    suffix = match.group("suffix") or ""
+    return f"{prefix}{target_channel_ref}/{mapped_msg_id}{suffix}"
+
+
+async def rewrite_message_links(text_html, source_id, link_context):
+    if not text_html or not link_context:
+        return text_html, 0
+
+    updated_html = text_html
+    rewrite_count = 0
+
+    async def replace_pattern(pattern, target_channel_ref):
+        nonlocal updated_html, rewrite_count
+        for match in list(pattern.finditer(updated_html)):
+            source_msg_id = int(match.group("msg_id"))
+            target_msg_id = await db.get_target_msg_id(source_id, source_msg_id)
+            if not target_msg_id:
+                continue
+            original = match.group(0)
+            replaced = _replace_msg_link(match, target_channel_ref, target_msg_id)
+            if original == replaced:
+                continue
+            updated_html = updated_html.replace(original, replaced)
+            rewrite_count += 1
+
+    if source_id != 0:
+        source_internal_id = str(abs(source_id)).removeprefix("100")
+        target_internal_id = str(abs(link_context["target_id"])).removeprefix("100")
+        await replace_pattern(
+            re.compile(rf"(?P<prefix>https?://t\.me/c/{re.escape(source_internal_id)}/)(?P<msg_id>\d+)(?P<suffix>\b)"),
+            f"https://t.me/c/{target_internal_id}",
+        )
+
+    if link_context.get("source_username") and link_context.get("target_username"):
+        await replace_pattern(
+            re.compile(rf"(?P<prefix>https?://t\.me/{re.escape(link_context['source_username'])}/)(?P<msg_id>\d+)(?P<suffix>\b)"),
+            f"https://t.me/{link_context['target_username']}",
+        )
+
+    return updated_html, rewrite_count
+
+
+async def rewrite_media_group_captions(source_id, target_id, group, source_username_override=None):
+    link_context = await build_link_rewrite_context(source_id, target_id, source_username_override=source_username_override)
+    captions = []
+    changed = False
+    total_rewrites = 0
+
+    for item in group:
+        original_caption = item.caption.html if item.caption else ""
+        rewritten_caption, rewrite_count = await rewrite_message_links(original_caption, source_id, link_context)
+        if rewritten_caption != original_caption:
+            changed = True
+        total_rewrites += rewrite_count
+        captions.append(rewritten_caption)
+
+    return captions, changed, total_rewrites
 
 
 def get_media_reference(msg, msg_type):
@@ -242,6 +324,10 @@ async def sync_single_message(mode, sender, app, bot, source_id, target_id, msg,
         return
 
     reply_to_id = await resolve_reply_target(source_id, get_reply_source_msg_id(msg, mode), mode.upper(), msg.id)
+    link_context = await build_link_rewrite_context(source_id, target_id)
+    new_html, rewrite_count = await rewrite_message_links(new_html, source_id, link_context)
+    if rewrite_count:
+        await db.add_msg_log(f"{mode.upper()}_LINK_REWRITE", f"原始:[{source_id}] 消息ID:{msg.id} | 命中 {rewrite_count} 个链接改写")
 
     try:
         if mode == "api":
@@ -358,22 +444,43 @@ async def sync_media_group(mode, sender, app, bot, source_id, target_id, group, 
 
     reply_to_id = await resolve_reply_target(source_id, get_reply_source_msg_id(group[0], mode), mode.upper(), group[0].id)
     quote_data = get_quote_payload(group[0])
+    rewritten_captions, captions_changed, caption_rewrite_count = await rewrite_media_group_captions(source_id, target_id, group)
 
     if mode == "api":
         for _ in range(3):
             if sync_state["stop_requested"]:
                 break
             try:
-                kwargs = {"chat_id": target_id, "from_chat_id": source_id, "message_id": group[0].id}
-                if reply_to_id:
-                    kwargs["reply_to_message_id"] = reply_to_id
-                if quote_data and reply_to_id:
-                    kwargs["quote_text"] = quote_data["text"]
-                    if quote_data.get("entities"):
-                        kwargs["quote_entities"] = quote_data["entities"]
-                copied_msgs = await safe_execute(app.copy_media_group(**kwargs))
+                if captions_changed:
+                    media_list = []
+                    for item, caption_html in zip(group, rewritten_captions):
+                        item_type, _ = get_msg_meta(item, mode)
+                        media_ref = get_media_reference(item, item_type)
+                        if not media_ref:
+                            raise ValueError(f"媒体组消息缺少可复用 file_id: {item.id}")
+                        media_cls = PYRO_MEDIA_CLS.get(item_type, PYRO_MEDIA_CLS["document"])
+                        media_list.append(media_cls(media=media_ref, caption=caption_html, parse_mode=ParseMode.HTML))
+                    kwargs = {"chat_id": target_id, "media": media_list}
+                    if reply_to_id:
+                        kwargs["reply_to_message_id"] = reply_to_id
+                    if quote_data and reply_to_id:
+                        kwargs["quote_text"] = quote_data["text"]
+                        if quote_data.get("entities"):
+                            kwargs["quote_entities"] = quote_data["entities"]
+                    copied_msgs = await safe_execute(app.send_media_group(**kwargs))
+                else:
+                    kwargs = {"chat_id": target_id, "from_chat_id": source_id, "message_id": group[0].id}
+                    if reply_to_id:
+                        kwargs["reply_to_message_id"] = reply_to_id
+                    if quote_data and reply_to_id:
+                        kwargs["quote_text"] = quote_data["text"]
+                        if quote_data.get("entities"):
+                            kwargs["quote_entities"] = quote_data["entities"]
+                    copied_msgs = await safe_execute(app.copy_media_group(**kwargs))
                 for orig_m, new_m in zip(group, copied_msgs):
                     await record_success(source_id, orig_m.id, new_m.id, force_send=force_send)
+                if captions_changed:
+                    await db.add_msg_log("API_GROUP_CAPTION_REWRITE", f"原始:[{source_id}] 组首ID:{group[0].id} | 命中 {caption_rewrite_count} 个 caption 链接改写")
                 if quote_data and reply_to_id:
                     await db.add_msg_log("API_QUOTE_GROUP_SEND", f"原始:[{source_id}] 组首ID:{group[0].id} | 已按引用回复发送媒体组")
                 break
@@ -432,10 +539,10 @@ async def sync_media_group(mode, sender, app, bot, source_id, target_id, group, 
             try:
                 sync_state["current_text"] = f"上传相册... [{upload_target['label']}]"
                 media_list = []
-                for item, path in downloaded_files:
+                for (item, path), caption_html in zip(downloaded_files, rewritten_captions):
                     item_type, _ = get_msg_meta(item, mode)
                     media_cls = cls_map.get(item_type, cls_map["document"])
-                    media_list.append(media_cls(media=FSInputFile(path) if actual_sender == "bot" else path, caption=item.caption.html if item.caption else "", parse_mode=parse_mode))
+                    media_list.append(media_cls(media=FSInputFile(path) if actual_sender == "bot" else path, caption=caption_html, parse_mode=parse_mode))
                 send_kwargs = {"chat_id": target_id, "media": media_list}
                 if reply_to_id:
                     send_kwargs["reply_to_message_id"] = reply_to_id
@@ -457,6 +564,8 @@ async def sync_media_group(mode, sender, app, bot, source_id, target_id, group, 
                 if actual_sender == "bot":
                     await bot_engine.note_upload_success(client, sum(file_sizes))
                 sent_group_success = True
+                if captions_changed:
+                    await db.add_msg_log("CLONE_GROUP_CAPTION_REWRITE", f"原始:[{source_id}] 组首ID:{group[0].id} | 命中 {caption_rewrite_count} 个 caption 链接改写")
                 if quote_data and reply_to_id:
                     await db.add_msg_log("CLONE_QUOTE_GROUP_SEND", f"原始:[{source_id}] 组首ID:{group[0].id} | 已按引用回复发送媒体组")
                 break
@@ -469,10 +578,10 @@ async def sync_media_group(mode, sender, app, bot, source_id, target_id, group, 
             first_id = group[0].id if group else 0
             await db.add_msg_log("BOT_FALLBACK", f"原始:[{source_id}] 组首ID:{first_id} | {upload_target['label']} 上传失败，回退辅助账号重传")
             media_list = []
-            for item, path in downloaded_files:
+            for (item, path), caption_html in zip(downloaded_files, rewritten_captions):
                 item_type, _ = get_msg_meta(item, mode)
                 media_cls = PYRO_MEDIA_CLS.get(item_type, PYRO_MEDIA_CLS["document"])
-                media_list.append(media_cls(media=path, caption=item.caption.html if item.caption else "", parse_mode=ParseMode.HTML))
+                media_list.append(media_cls(media=path, caption=caption_html, parse_mode=ParseMode.HTML))
             send_kwargs = {"chat_id": target_id, "media": media_list}
             if reply_to_id:
                 send_kwargs["reply_to_message_id"] = reply_to_id
@@ -493,7 +602,7 @@ async def sync_media_group(mode, sender, app, bot, source_id, target_id, group, 
     await asyncio.sleep(safe_delay)
 
 
-async def process_json_sync(target_id_raw, json_path, safe_delay, force_send):
+async def process_json_sync(target_id_raw, json_path, safe_delay, force_send, json_source_username=""):
     if not json_path or not os.path.exists(json_path):
         await db.add_log("ERROR", "JSON 文件不存在或路径无效")
         return
@@ -508,8 +617,10 @@ async def process_json_sync(target_id_raw, json_path, safe_delay, force_send):
     messages = data.get("messages", [])
     json_dir = os.path.dirname(os.path.abspath(json_path))
     target_id = await resolve_chat_id(target_id_raw)
+    link_context = await build_link_rewrite_context(0, target_id, source_username_override=json_source_username)
     sync_state["total"] = len(messages)
     warned_media_groups = False
+    warned_link_rewrite = False
 
     for msg in messages:
         if sync_state["stop_requested"]:
@@ -519,8 +630,17 @@ async def process_json_sync(target_id_raw, json_path, safe_delay, force_send):
 
         msg_id = msg.get("id", 0)
         text = build_json_text(msg)
+        if text and not warned_link_rewrite and re.search(r"https?://t\.me/(?:c/)?[^/\s]+/\d+", text):
+            warned_link_rewrite = True
+            if json_source_username:
+                await db.add_msg_log("JSON_INFO", f"JSON 导入已启用链接改写，源频道用户名: @{str(json_source_username).lstrip('@')}")
+            else:
+                await db.add_msg_log("JSON_WARN", "JSON 导入检测到消息链接引用；未填写源频道用户名，无法安全改写源频道链接")
         if await update_state_and_check_skip(0, msg_id, text[:50] or "[媒体]", force_send=force_send):
             continue
+        text, rewrite_count = await rewrite_message_links(text, 0, link_context)
+        if rewrite_count:
+            await db.add_msg_log("JSON_LINK_REWRITE", f"消息ID:{msg_id} | 命中 {rewrite_count} 个链接改写")
 
         media_group_hint = msg.get("media_group_id") or msg.get("grouped_id") or msg.get("media_group")
         if media_group_hint and not warned_media_groups:
@@ -568,14 +688,14 @@ async def process_json_sync(target_id_raw, json_path, safe_delay, force_send):
         await asyncio.sleep(safe_delay)
 
 
-async def process_master_sync(mode: str, sender: str, source_id_raw: str, target_id_raw: str, delay: float, start_id: int, end_id: int, json_path: str, force_send: bool = False):
+async def process_master_sync(mode: str, sender: str, source_id_raw: str, target_id_raw: str, delay: float, start_id: int, end_id: int, json_path: str, force_send: bool = False, json_source_username: str = ""):
     safe_delay = max(0.5, float(delay))
     if mode == "api":
         sender = "user"
     elif mode == "json":
         sender = "bot"
 
-    sync_state.update({"is_syncing": True, "mode": mode.upper(), "source_id_raw": source_id_raw, "target_id_raw": target_id_raw, "delay": safe_delay, "start_id": start_id, "end_id": end_id, "json_path": json_path, "current": 0, "skipped": 0, "total": 0, "stop_requested": False, "force_send": force_send})
+    sync_state.update({"is_syncing": True, "mode": mode.upper(), "source_id_raw": source_id_raw, "target_id_raw": target_id_raw, "delay": safe_delay, "start_id": start_id, "end_id": end_id, "json_path": json_path, "json_source_username": json_source_username, "current": 0, "skipped": 0, "total": 0, "stop_requested": False, "force_send": force_send})
     settings = await db.get_all_settings()
 
     try:
@@ -648,7 +768,7 @@ async def process_master_sync(mode: str, sender: str, source_id_raw: str, target
                     else:
                         await sync_media_group(mode, sender, app, bot, source_id, target_id, group, safe_delay, force_send)
         else:
-            await process_json_sync(target_id_raw, json_path, safe_delay, force_send)
+            await process_json_sync(target_id_raw, json_path, safe_delay, force_send, json_source_username=json_source_username)
 
     except asyncio.CancelledError:
         pass
