@@ -5,15 +5,15 @@
 
 [GitHub 仓库](https://github.com/RRHTY/tg-channel-sync)  | [Release](https://github.com/RRHTY/tg-channel-sync/releases)
 
-频道内容
+**频道内容**
 
-<img width="720" alt="频道内容预览 1" src="https://github.com/user-attachments/assets/7d25932c-2cce-4dea-9879-fde967e2fc21" />
-<img width="720" alt="频道内容预览 2" src="https://github.com/user-attachments/assets/3f8fb204-08d7-44d2-8b65-16e7ae393224" />
+![频道内容预览 1](https://github.com/user-attachments/assets/7d25932c-2cce-4dea-9879-fde967e2fc21 "频道内容预览 1") ![频道内容预览 2](https://github.com/user-attachments/assets/3f8fb204-08d7-44d2-8b65-16e7ae393224 "频道内容预览 2")
 
-Web页面
+**Web页面**
+首页             |  设置
+:-------------------------:|:-------------------------:
+![Web 页面预览 1](https://github.com/user-attachments/assets/32ef11ae-2e8d-4228-ab7f-ac32ca46db14 "Web 页面预览 1") |  ![Web 页面预览 2](https://github.com/user-attachments/assets/f7dd89aa-742e-4002-a566-2271799044cc "Web 页面预览 2")
 
-<img width="720" alt="Web 页面预览 1" src="https://github.com/user-attachments/assets/c50aa34d-7ee6-443f-995b-901d506e79a7" />
-<img width="720" alt="Web 页面预览 2" src="https://github.com/user-attachments/assets/08e29f40-db09-4b5e-b2cf-941a4a36a078" />
 
 
 
@@ -117,6 +117,27 @@ Web页面
 3. `temp/`：下载重传时使用的临时目录
 
 打包脚本默认使用当前 `VERSION` 文件内容生成压缩包名称。
+
+-----
+## 功能矩阵
+
+| 功能 | 实时同步 | JSON 导入 | API 复制 | 下载重传 |
+| --- | --- | --- | --- | --- |
+| 频道映射 | 支持，多对多 | 不适用 | 不适用 | 不适用 |
+| 类型过滤 | 支持 | 支持 | 支持 | 支持 |
+| 正则过滤 | 支持 | 支持 | 支持 | 支持 |
+| 日志查看与清理 | 支持 | 支持 | 支持 | 支持 |
+| 链接改写 | 支持 | 支持，建议填写源频道用户名 | 支持 | 支持 |
+| 普通回复恢复 | 支持 | 支持 | 支持 | 支持 |
+| 引用回复恢复 | 支持，尽量保留 | 不支持 | 支持，尽量保留 | 支持，尽量保留 |
+| 历史批量同步 | 不适用 | 支持 | 支持 | 支持 |
+
+补充说明：
+
+1. `频道映射` 目前主要服务于实时同步。历史任务仍然是手动指定 `source_id -> target_id` 启动，不会按映射表批量执行。
+2. `JSON 导入` 现在已经接入现有的类型过滤和正则过滤逻辑。
+3. `JSON 导入` 通常只能从导出文件中拿到 `reply_to_message_id`，因此最多只能恢复“普通回复”关系，不能恢复 Telegram 原生的“引用回复”片段。
+4. `API 复制` 和 `下载重传` 依赖辅助账号登录；仅配置 `Bot Token` 时，主要可用实时同步和 `JSON 导入`。
 
 -----
 ## ToDo
