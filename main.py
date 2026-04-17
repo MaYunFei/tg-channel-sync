@@ -480,7 +480,16 @@ async def resolve_chat_id(chat_ref: str) -> int:
 
 @app.get("/api/mappings")
 async def get_mappings():
-    return [{"source_id": row[0], "target_id": row[1]} for row in await db.get_all_channel_mappings()]
+    mappings = [{"source_id": row[0], "target_id": row[1]} for row in await db.get_all_channel_mappings()]
+    grouped = {}
+    for item in mappings:
+        target_id = item["target_id"]
+        grouped.setdefault(target_id, []).append(item["source_id"])
+    grouped_mappings = [
+        {"target_id": target_id, "source_ids": sorted(source_ids)}
+        for target_id, source_ids in sorted(grouped.items(), key=lambda pair: pair[0])
+    ]
+    return {"mappings": mappings, "grouped_mappings": grouped_mappings}
 
 
 @app.post("/api/mappings")
