@@ -63,9 +63,19 @@ async def _force_cleanup():
     sync_state["stop_requested"] = True
 
     if polling_task:
-        polling_task.cancel()
         try:
-            await polling_task
+            if not polling_task.done():
+                try:
+                    await bot_engine.dp.stop_polling()
+                except RuntimeError:
+                    pass
+            await asyncio.wait_for(polling_task, timeout=5)
+        except asyncio.TimeoutError:
+            polling_task.cancel()
+            try:
+                await polling_task
+            except Exception:
+                pass
         except Exception:
             pass
         polling_task = None
@@ -123,7 +133,13 @@ async def lifespan(app: FastAPI):
         if bot:
             me = await bot.get_me()
             refresh_app_info({"name": me.first_name, "username": me.username, "status": STATUS_CONNECTED})
-            polling_task = asyncio.create_task(bot_engine.dp.start_polling(bot))
+            polling_task = asyncio.create_task(
+                bot_engine.dp.start_polling(
+                    bot,
+                    handle_signals=False,
+                    close_bot_session=False,
+                )
+            )
     except Exception as exc:
         refresh_app_info({"status": STATUS_START_FAILED})
         await db.add_sys_log("ERROR", f"Bot 启动失败: {exc}")

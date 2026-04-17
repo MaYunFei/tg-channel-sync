@@ -16,7 +16,7 @@ from services.sync_services import (
     resolve_reply_target,
     rewrite_message_links,
 )
-from .common import build_json_text, get_reply_source_msg_id, resolve_json_media
+from .common import build_json_text, get_msg_meta, get_reply_source_msg_id, resolve_json_media
 from .state import record_success, sync_state, update_state_and_check_skip
 
 
@@ -44,6 +44,7 @@ async def process_json_sync(target_id_raw, json_path, safe_delay, force_send, js
     sync_state["total"] = len(messages)
     warned_media_groups = False
     warned_link_rewrite = False
+    settings = await db.get_all_settings()
 
     for msg in messages:
         if sync_state["stop_requested"]:
@@ -52,6 +53,11 @@ async def process_json_sync(target_id_raw, json_path, safe_delay, force_send, js
             continue
 
         msg_id = msg.get("id", 0)
+        msg_type, sync_key = get_msg_meta(msg, "json")
+        if settings.get(sync_key, "1") == "0":
+            await db.add_msg_log("JSON_DROP_TYPE", f"消息ID:{msg_id} | type={msg_type}")
+            continue
+
         text = build_json_text(msg)
         if text and not warned_link_rewrite and MESSAGE_LINK_RE.search(text):
             warned_link_rewrite = True
@@ -59,6 +65,24 @@ async def process_json_sync(target_id_raw, json_path, safe_delay, force_send, js
                 await db.add_msg_log("JSON_INFO", f"JSON 导入已启用链接改写，源频道用户名: @{str(json_source_username).lstrip('@')}")
             else:
                 await db.add_msg_log("JSON_WARN", "JSON 导入检测到消息链接引用；未填写源频道用户名，无法安全改写源频道链接")
+
+        file_name = ""
+        if msg.get("file"):
+            file_name = os.path.basename(str(msg.get("file") or ""))
+        elif msg.get("photo"):
+            file_name = os.path.basename(str(msg.get("photo") or ""))
+        elif msg.get("video"):
+            file_name = os.path.basename(str(msg.get("video") or ""))
+        elif msg.get("audio"):
+            file_name = os.path.basename(str(msg.get("audio") or ""))
+        elif msg.get("voice"):
+            file_name = os.path.basename(str(msg.get("voice") or ""))
+
+        should_skip, text = await db.apply_message_filters(text, msg_type != "text", file_name)
+        if should_skip or (msg_type == "text" and not text.strip()):
+            await db.add_msg_log("JSON_DROP_REGEX", f"消息ID:{msg_id}")
+            continue
+
         if await update_state_and_check_skip(0, target_id, msg_id, text[:50] or "[媒体]", force_send=force_send):
             continue
         text, rewrite_count = await rewrite_message_links(text, 0, link_context)
