@@ -78,6 +78,25 @@ function Remove-PathBestEffort {
     }
 }
 
+function Cleanup-StaleStageDirs {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$TempRoot,
+        [int]$OlderThanHours = 12
+    )
+
+    if (-not (Test-Path $TempRoot)) {
+        return
+    }
+
+    $cutoff = (Get-Date).AddHours(-1 * $OlderThanHours)
+    Get-ChildItem -LiteralPath $TempRoot -Directory -Filter "package-*" -ErrorAction SilentlyContinue | ForEach-Object {
+        if ($_.LastWriteTime -lt $cutoff) {
+            Remove-PathBestEffort -Path $_.FullName -Recurse
+        }
+    }
+}
+
 $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $ProjectRoot
 
@@ -89,7 +108,8 @@ if (-not $Version) {
 $DistRoot = Join-Path $ProjectRoot "dist-portable"
 $BuildRoot = Join-Path $ProjectRoot "build"
 $PyInstallerDist = Join-Path $ProjectRoot "dist"
-$StageRoot = Join-Path (Join-Path $ProjectRoot "temp") ("package-" + [Guid]::NewGuid().ToString("N"))
+$TempRoot = Join-Path $ProjectRoot "temp"
+$StageRoot = Join-Path $TempRoot ("package-" + [Guid]::NewGuid().ToString("N"))
 $PortableName = "tg-channel-sync-$Version-windows-x64-portable"
 $PortableDir = Join-Path $StageRoot $PortableName
 $PortableZipPath = Join-Path $DistRoot "$PortableName.zip"
@@ -113,6 +133,8 @@ if (Test-Path $FullZipPath) {
 }
 
 New-Item -ItemType Directory -Path $DistRoot -Force | Out-Null
+New-Item -ItemType Directory -Path $TempRoot -Force | Out-Null
+Cleanup-StaleStageDirs -TempRoot $TempRoot
 
 $PyInstaller = Join-Path $ProjectRoot "venv\Scripts\pyinstaller.exe"
 if (-not (Test-Path $PyInstaller)) {
@@ -182,9 +204,6 @@ Set-Content -LiteralPath (Join-Path $FullDir "start-no-browser.bat") -Value $Sta
 Compress-DirectoryWithRetry -SourceDir $PortableDir -DestinationZip $PortableZipPath
 Compress-DirectoryWithRetry -SourceDir $FullDir -DestinationZip $FullZipPath
 
-if (Test-Path $StageRoot) {
-    Remove-PathBestEffort -Path $StageRoot -Recurse
-}
 if (Test-Path $PyInstallerDist) {
     Remove-PathBestEffort -Path $PyInstallerDist -Recurse
 }
@@ -194,3 +213,4 @@ Write-Host "Build completed:"
 Write-Host "  Portable zip:       $PortableZipPath"
 Write-Host "  Full zip:           $FullZipPath"
 Write-Host "  Output folder:      $DistRoot"
+Write-Host "  Temp stage:         $StageRoot"
