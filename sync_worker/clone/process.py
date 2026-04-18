@@ -31,6 +31,7 @@ from ..core import (
     get_msg_meta,
     get_reply_source_msg_id,
     normalize_bot_html,
+    prepend_source_header_html,
     rewrite_media_group_captions,
 )
 from ..media import describe_hash_perturb_reason, prepare_media_for_send
@@ -66,11 +67,12 @@ from ..json_import import process_json_sync
 
 AIO_MEDIA_CLS = {"photo": AioPhoto, "video": AioVideo, "audio": AioAudio, "document": AioDoc}
 
-async def sync_single_message(mode, sender, app, bot, source_id, target_id, msg, safe_delay, force_send, hash_perturb=False, clone_fallback_to_user=True):
+async def sync_single_message(mode, sender, app, bot, source_id, target_id, msg, safe_delay, force_send, hash_perturb=False, clone_fallback_to_user=True, include_external_source_header: bool = False):
     msg_type, _ = get_msg_meta(msg, mode)
     has_media = msg_type != "text"
     file_name = getattr(getattr(msg, msg_type, None), "file_name", "") if msg_type in ["document", "video"] else ""
     text_html = msg.text.html if msg.text else (msg.caption.html if msg.caption else "") if hasattr(msg, "text") else ""
+    text_html = prepend_source_header_html(text_html, msg, enabled=include_external_source_header)
     quote_data = get_quote_payload(msg)
 
     should_skip, new_html = await db.apply_message_filters(text_html, has_media, file_name or "")
@@ -305,13 +307,18 @@ async def sync_single_message(mode, sender, app, bot, source_id, target_id, msg,
     await asyncio.sleep(safe_delay)
 
 
-async def sync_media_group(mode, sender, app, bot, source_id, target_id, group, safe_delay, force_send, hash_perturb=False, clone_fallback_to_user=True):
+async def sync_media_group(mode, sender, app, bot, source_id, target_id, group, safe_delay, force_send, hash_perturb=False, clone_fallback_to_user=True, include_external_source_header: bool = False):
     if await update_state_and_check_skip(source_id, target_id, group[0].id, "[媒体组]", force_send=force_send):
         return
 
     reply_to_id = await resolve_reply_target(source_id, target_id, get_reply_source_msg_id(group[0], mode), mode.upper(), group[0].id)
     quote_data = get_quote_payload(group[0])
-    rewritten_captions, captions_changed, caption_rewrite_count = await rewrite_media_group_captions(source_id, target_id, group)
+    rewritten_captions, captions_changed, caption_rewrite_count = await rewrite_media_group_captions(
+        source_id,
+        target_id,
+        group,
+        include_external_source_header=include_external_source_header,
+    )
 
     if mode == "api":
         for _ in range(3):
@@ -636,6 +643,7 @@ async def process_master_sync(
         clone_fallback_to_user,
     )
     settings = await db.get_all_settings()
+    include_external_source_header = bool(getattr(settings, "get", lambda *_: False)("add_external_source_header", False))
 
     try:
         source_id = 0 if mode == "json" else await resolve_chat_id(bot_engine.aiogram_bot, source_id_raw)
@@ -695,6 +703,7 @@ async def process_master_sync(
                             force_send,
                             hash_perturb=hash_perturb,
                             clone_fallback_to_user=clone_fallback_to_user,
+                            include_external_source_header=include_external_source_header,
                         )
                     else:
                         await sync_media_group(
@@ -709,6 +718,7 @@ async def process_master_sync(
                             force_send,
                             hash_perturb=hash_perturb,
                             clone_fallback_to_user=clone_fallback_to_user,
+                            include_external_source_header=include_external_source_header,
                         )
         else:
             await process_json_sync(

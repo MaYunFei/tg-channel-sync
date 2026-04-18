@@ -299,7 +299,7 @@ async def process_json_sync(
     warned_media_groups = False
     warned_link_rewrite = False
     settings = await db.get_all_settings()
-    include_external_source_header = bool(getattr(settings, "get", lambda *_: False)("json_add_external_source_header", False))
+    include_external_source_header = bool(getattr(settings, "get", lambda *_: False)("add_external_source_header", False))
 
     media_group_window_seconds = max(1, int(media_group_window_seconds or JSON_MEDIA_GROUP_WINDOW_SECONDS))
 

@@ -257,6 +257,7 @@ class JsonSyncTests(unittest.IsolatedAsyncioTestCase):
                                 "id": 4,
                                 "type": "message",
                                 "forwarded_from": "test_channel",
+                                "forwarded_from_id": "channel3717669322",
                                 "reply_to_peer_id": "-100123",
                                 "reply_to_message_id": "456",
                                 "text": [
@@ -273,7 +274,7 @@ class JsonSyncTests(unittest.IsolatedAsyncioTestCase):
             with patch("sync_worker.json_import.process.resolve_chat_id", AsyncMock(return_value=-100456)), \
                  patch("sync_worker.json_import.process.build_link_rewrite_context", AsyncMock(return_value={})), \
                  patch("sync_worker.json_import.process.resolve_reply_target", AsyncMock(return_value=None)), \
-                 patch("sync_worker.json_import.process.db.get_all_settings", AsyncMock(return_value={"sync_text": "1", "json_add_external_source_header": True})), \
+                 patch("sync_worker.json_import.process.db.get_all_settings", AsyncMock(return_value={"sync_text": "1", "add_external_source_header": True})), \
                  patch("sync_worker.json_import.process.db.add_msg_log", AsyncMock()), \
                  patch("sync_worker.json_import.process.db.apply_message_filters", AsyncMock(side_effect=lambda text, *_: (False, text))), \
                  patch("sync_worker.json_import.process.update_state_and_check_skip", AsyncMock(return_value=False)), \
@@ -284,7 +285,8 @@ class JsonSyncTests(unittest.IsolatedAsyncioTestCase):
                 await json_sync.process_json_sync("bot", "@target", str(json_path), 0.5, False)
 
             sent_text = mock_bot.send_message.await_args.args[1]
-            self.assertIn("#转发自 test_channel", sent_text)
+            self.assertIn('href="tg://openmessage?chat_id=-1003717669322"', sent_text)
+            self.assertIn(">test_channel</a>", sent_text)
             self.assertIn('href="tg://openmessage?chat_id=-100123&amp;message_id=456"', sent_text)
             self.assertIn('<pre><code class="language-Json">{&quot;a&quot;:1}</code></pre>', sent_text)
 

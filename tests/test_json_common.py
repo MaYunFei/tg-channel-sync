@@ -36,13 +36,15 @@ class JsonCommonTests(unittest.TestCase):
         rendered = build_json_text(
             {
                 "forwarded_from": "test_channel",
+                "forwarded_from_id": "channel3717669322",
                 "reply_to_peer_id": "-100123",
                 "reply_to_message_id": "456",
                 "text": "正文",
             },
             include_external_source_header=True,
         )
-        self.assertIn("#转发自 test_channel", rendered)
+        self.assertIn('href="tg://openmessage?chat_id=-1003717669322"', rendered)
+        self.assertIn(">test_channel</a>", rendered)
         self.assertIn('href="tg://openmessage?chat_id=-100123&amp;message_id=456"', rendered)
         self.assertTrue(rendered.endswith("\n正文"))
 

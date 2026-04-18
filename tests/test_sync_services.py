@@ -4,11 +4,19 @@ from unittest.mock import AsyncMock, patch
 import bot_engine
 from services import sync_services
 from sync_worker.clone import process as history
+from sync_worker.core import prepend_source_header_html
 
 
 class FakeChat:
     def __init__(self, chat_id):
         self.id = chat_id
+
+
+class FakeNamedChat:
+    def __init__(self, chat_id, title=None, username=None):
+        self.id = chat_id
+        self.title = title
+        self.username = username
 
 
 class FakeBot:
@@ -48,6 +56,45 @@ class SyncServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(rewritten, "https://t.me/c/3717669322/301")
         self.assertEqual(count, 1)
+
+    def test_prepend_source_header_html_supports_pyrogram_like_message(self):
+        msg = type(
+            "Msg",
+            (),
+            {
+                "forward_from_chat": FakeNamedChat(-100123, title="原频道"),
+                "forward_from": None,
+                "forward_sender_name": None,
+                "external_reply": type(
+                    "ExternalReply",
+                    (),
+                    {
+                        "chat": FakeNamedChat(-100456),
+                        "message_id": 789,
+                    },
+                )(),
+            },
+        )()
+
+        rendered = prepend_source_header_html("正文", msg, enabled=True)
+
+        self.assertIn('href="tg://openmessage?chat_id=-100123"', rendered)
+        self.assertIn(">原频道</a>", rendered)
+        self.assertIn('href="tg://openmessage?chat_id=-100456&amp;message_id=789"', rendered)
+        self.assertTrue(rendered.endswith("\n正文"))
+
+    def test_prepend_source_header_html_supports_json_forwarded_channel_peer(self):
+        rendered = prepend_source_header_html(
+            "正文",
+            {
+                "forwarded_from": "333频道",
+                "forwarded_from_id": "channel3912522050",
+            },
+            enabled=True,
+        )
+
+        self.assertIn('href="tg://openmessage?chat_id=-1003912522050"', rendered)
+        self.assertIn(">333频道</a>", rendered)
 
     def test_compute_progress_speed_uses_delta(self):
         speed = sync_services.compute_progress_speed(20 * 1024 * 1024, 10 * 1024 * 1024, 2)

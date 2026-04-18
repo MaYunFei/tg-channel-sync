@@ -6,7 +6,7 @@ from pyrogram.types import InputMediaAudio, InputMediaDocument, InputMediaPhoto,
 import bot_engine
 from services.sync_services import build_link_rewrite_context, rewrite_message_links
 
-from .text import normalize_bot_html
+from .text import normalize_bot_html, prepend_source_header_html
 
 
 PYRO_MEDIA_CLS = {
@@ -17,7 +17,7 @@ PYRO_MEDIA_CLS = {
 }
 
 
-async def rewrite_media_group_captions(source_id, target_id, group, source_username_override=None):
+async def rewrite_media_group_captions(source_id, target_id, group, source_username_override=None, include_external_source_header: bool = False):
     link_context = await build_link_rewrite_context(
         bot_engine.aiogram_bot,
         source_id,
@@ -30,6 +30,7 @@ async def rewrite_media_group_captions(source_id, target_id, group, source_usern
 
     for item in group:
         original_caption = item.caption.html if item.caption else ""
+        original_caption = prepend_source_header_html(original_caption, item, enabled=include_external_source_header)
         rewritten_caption, rewrite_count = await rewrite_message_links(original_caption, source_id, link_context)
         rewritten_caption = normalize_bot_html(rewritten_caption)
         if rewritten_caption != original_caption:
