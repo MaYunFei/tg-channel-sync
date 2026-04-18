@@ -3,6 +3,8 @@ from __future__ import annotations
 from ..core import build_json_text, get_msg_meta
 from .helpers import JSON_MEDIA_GROUP_WINDOW_SECONDS
 
+JSON_MEDIA_GROUP_MAX_ITEMS = 10
+
 
 def _json_message_timestamp(msg: dict) -> int:
     try:
@@ -60,14 +62,17 @@ def group_json_messages(messages: list[dict], window_seconds: int) -> list[list[
     grouped = []
     current_heuristic_group: list[dict] = []
 
+    def append_group_chunk(group: list[dict]):
+        if not group:
+            return
+        for start in range(0, len(group), JSON_MEDIA_GROUP_MAX_ITEMS):
+            grouped.append(group[start : start + JSON_MEDIA_GROUP_MAX_ITEMS])
+
     def flush_heuristic_group():
         nonlocal current_heuristic_group
         if not current_heuristic_group:
             return
-        if len(current_heuristic_group) == 1:
-            grouped.append([current_heuristic_group[0]])
-        else:
-            grouped.append(current_heuristic_group)
+        append_group_chunk(current_heuristic_group)
         current_heuristic_group = []
 
     for msg in messages:
@@ -76,7 +81,7 @@ def group_json_messages(messages: list[dict], window_seconds: int) -> list[list[
             flush_heuristic_group()
             if grouped and len(grouped[-1]) > 0:
                 prev_explicit = grouped[-1][0].get("media_group_id") or grouped[-1][0].get("grouped_id") or grouped[-1][0].get("media_group")
-                if prev_explicit == explicit_group_id:
+                if prev_explicit == explicit_group_id and len(grouped[-1]) < JSON_MEDIA_GROUP_MAX_ITEMS:
                     grouped[-1].append(msg)
                     continue
             grouped.append([msg])

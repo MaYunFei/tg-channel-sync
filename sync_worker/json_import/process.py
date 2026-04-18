@@ -124,6 +124,7 @@ async def send_json_media_group(
     sender: str,
     clone_fallback_to_user: bool,
     hash_perturb: bool = False,
+    include_external_source_header: bool = False,
 ):
     group_ids = [int(item.get("id") or 0) for item in group]
     first_msg = group[0]
@@ -151,7 +152,7 @@ async def send_json_media_group(
         total_bytes += os.path.getsize(media_path)
         file_entries.append((item, media_path, media_type))
 
-        caption_html = build_json_text(item)
+        caption_html = build_json_text(item, include_external_source_header=include_external_source_header)
         caption_html, rewrite_count = await rewrite_message_links(caption_html, source_scope_id, link_context)
         if rewrite_count:
             await db.add_msg_log("JSON_LINK_REWRITE", f"消息ID:{item_id} | 命中 {rewrite_count} 个链接改写")
@@ -298,6 +299,7 @@ async def process_json_sync(
     warned_media_groups = False
     warned_link_rewrite = False
     settings = await db.get_all_settings()
+    include_external_source_header = bool(getattr(settings, "get", lambda *_: False)("json_add_external_source_header", False))
 
     media_group_window_seconds = max(1, int(media_group_window_seconds or JSON_MEDIA_GROUP_WINDOW_SECONDS))
 
@@ -319,6 +321,7 @@ async def process_json_sync(
                 sender,
                 clone_fallback_to_user,
                 hash_perturb,
+                include_external_source_header,
             )
             if result is not None:
                 await asyncio.sleep(safe_delay)
@@ -335,7 +338,7 @@ async def process_json_sync(
                 await db.add_msg_log("JSON_DROP_TYPE", f"消息ID:{msg_id} | 类型:{msg_type} | 已被类型过滤拦截")
                 continue
 
-            text = build_json_text(msg)
+            text = build_json_text(msg, include_external_source_header=include_external_source_header)
             if text and not warned_link_rewrite and MESSAGE_LINK_RE.search(text):
                 warned_link_rewrite = True
                 if source_username:

@@ -78,6 +78,39 @@ class JsonSyncTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([[item["id"] for item in group] for group in grouped], [[97, 98, 99, 100], [101]])
 
+    def test_group_json_messages_splits_explicit_media_group_above_10_items(self):
+        messages = [
+            {
+                "id": index,
+                "type": "message",
+                "date_unixtime": str(index),
+                "photo": f"photos/{index}.jpg",
+                "media_group_id": "album-1",
+                "text": "" if index > 1 else "首条说明",
+            }
+            for index in range(1, 12)
+        ]
+
+        grouped = json_sync.group_json_messages(messages, 3)
+
+        self.assertEqual([[item["id"] for item in group] for group in grouped], [list(range(1, 11)), [11]])
+
+    def test_group_json_messages_splits_heuristic_media_group_above_10_items(self):
+        messages = [
+            {
+                "id": index,
+                "type": "message",
+                "date_unixtime": "1776427654",
+                "file": f"files/testfile-{index}.txt",
+                "text": "",
+            }
+            for index in range(1, 12)
+        ]
+
+        grouped = json_sync.group_json_messages(messages, 3)
+
+        self.assertEqual([[item["id"] for item in group] for group in grouped], [list(range(1, 11)), [11]])
+
     async def test_send_json_media_group_keeps_document_captions(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             for name in ["a.txt", "b.txt"]:
@@ -212,6 +245,48 @@ class JsonSyncTests(unittest.IsolatedAsyncioTestCase):
                 await json_sync.process_json_sync("user", "@target", str(json_path), 0.5, False)
 
             fake_user.send_message.assert_awaited_once()
+
+    async def test_process_json_sync_can_prepend_external_source_header(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            json_path = Path(temp_dir) / "result.json"
+            json_path.write_text(
+                json.dumps(
+                    {
+                        "messages": [
+                            {
+                                "id": 4,
+                                "type": "message",
+                                "forwarded_from": "test_channel",
+                                "reply_to_peer_id": "-100123",
+                                "reply_to_message_id": "456",
+                                "text": [
+                                    {"type": "pre", "text": '{"a":1}', "language": "Json"},
+                                ],
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("sync_worker.json_import.process.resolve_chat_id", AsyncMock(return_value=-100456)), \
+                 patch("sync_worker.json_import.process.build_link_rewrite_context", AsyncMock(return_value={})), \
+                 patch("sync_worker.json_import.process.resolve_reply_target", AsyncMock(return_value=None)), \
+                 patch("sync_worker.json_import.process.db.get_all_settings", AsyncMock(return_value={"sync_text": "1", "json_add_external_source_header": True})), \
+                 patch("sync_worker.json_import.process.db.add_msg_log", AsyncMock()), \
+                 patch("sync_worker.json_import.process.db.apply_message_filters", AsyncMock(side_effect=lambda text, *_: (False, text))), \
+                 patch("sync_worker.json_import.process.update_state_and_check_skip", AsyncMock(return_value=False)), \
+                 patch("sync_worker.json_import.process.record_success", AsyncMock()), \
+                 patch("sync_worker.json_import.process.bot_engine.aiogram_bot") as mock_bot:
+                mock_bot.send_message = AsyncMock(return_value=FakeSentMessage(1004))
+
+                await json_sync.process_json_sync("bot", "@target", str(json_path), 0.5, False)
+
+            sent_text = mock_bot.send_message.await_args.args[1]
+            self.assertIn("#转发自 test_channel", sent_text)
+            self.assertIn('href="tg://openmessage?chat_id=-100123&amp;message_id=456"', sent_text)
+            self.assertIn('<pre><code class="language-Json">{&quot;a&quot;:1}</code></pre>', sent_text)
 
     async def test_prepare_json_media_path_preserves_original_file(self):
         with tempfile.TemporaryDirectory() as temp_dir:

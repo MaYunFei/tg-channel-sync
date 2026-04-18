@@ -25,11 +25,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "server": {
         "host": "127.0.0.1",
         "port": 8011,
-        "auto_open_browser": True,
+        "auto_open_browser": False,
     },
     "sync": {
         "default_delay": 5,
         "force_send": False,
+        "json_add_external_source_header": False,
         "prefer_local_bot_api": True,
         "bot_upload_max_mb": 50,
         "bot_rate_limit_enabled": False,
@@ -88,6 +89,7 @@ def _normalize_config(config: dict[str, Any]) -> dict[str, Any]:
 
     sync["default_delay"] = max(0.5, float(sync.get("default_delay", 5) or 5))
     sync["force_send"] = bool(sync.get("force_send", False))
+    sync["json_add_external_source_header"] = bool(sync.get("json_add_external_source_header", False))
     sync["prefer_local_bot_api"] = bool(sync.get("prefer_local_bot_api", True))
     sync["bot_upload_max_mb"] = max(1.0, float(sync.get("bot_upload_max_mb", 50) or 50))
     sync["bot_rate_limit_enabled"] = bool(sync.get("bot_rate_limit_enabled", False))
