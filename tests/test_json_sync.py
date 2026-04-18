@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from sync_worker import json_sync
+from sync_worker.json_import import process as json_sync
 
 
 class FakeSentMessage:
@@ -22,7 +22,7 @@ class JsonSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(json_sync._is_request_entity_too_large(Exception("Too Many Requests")))
 
     async def test_send_json_single_via_user_raises_fatal_when_user_not_logged_in(self):
-        with patch("sync_worker.json_sync.bot_engine.pyro_user_app") as mock_app:
+        with patch("sync_worker.json_import.process.bot_engine.pyro_user_app") as mock_app:
             mock_app.is_initialized = False
             with self.assertRaises(json_sync.JsonSyncFatalError):
                 await json_sync._send_json_single_via_user(
@@ -101,12 +101,12 @@ class JsonSyncTests(unittest.IsolatedAsyncioTestCase):
             ]
 
             mock_send = AsyncMock(return_value=[FakeSentMessage(1001), FakeSentMessage(1002)])
-            with patch("sync_worker.json_sync.update_state_and_check_skip", AsyncMock(return_value=False)), \
-                 patch("sync_worker.json_sync.resolve_reply_target", AsyncMock(return_value=None)), \
-                 patch("sync_worker.json_sync.rewrite_message_links", AsyncMock(side_effect=lambda text, *_: (text, 0))), \
-                 patch("sync_worker.json_sync.record_success", AsyncMock()), \
-                 patch("sync_worker.json_sync.db.add_msg_log", AsyncMock()), \
-                 patch("sync_worker.json_sync.bot_engine.aiogram_bot") as mock_bot:
+            with patch("sync_worker.json_import.process.update_state_and_check_skip", AsyncMock(return_value=False)), \
+                 patch("sync_worker.json_import.process.resolve_reply_target", AsyncMock(return_value=None)), \
+                 patch("sync_worker.json_import.process.rewrite_message_links", AsyncMock(side_effect=lambda text, *_: (text, 0))), \
+                 patch("sync_worker.json_import.process.record_success", AsyncMock()), \
+                 patch("sync_worker.json_import.process.db.add_msg_log", AsyncMock()), \
+                 patch("sync_worker.json_import.process.bot_engine.aiogram_bot") as mock_bot:
                 mock_bot.send_media_group = mock_send
 
                 await json_sync.send_json_media_group(group, -100456, temp_dir, 0, False, {}, "bot", True)
@@ -134,14 +134,14 @@ class JsonSyncTests(unittest.IsolatedAsyncioTestCase):
                 encoding="utf-8",
             )
 
-            with patch("sync_worker.json_sync.resolve_chat_id", AsyncMock(return_value=-100456)), \
-                 patch("sync_worker.json_sync.build_link_rewrite_context", AsyncMock(return_value={})), \
-                 patch("sync_worker.json_sync.db.get_all_settings", AsyncMock(return_value={"sync_photo": "0"})), \
-                 patch("sync_worker.json_sync.db.add_msg_log", AsyncMock()) as mock_add_msg_log, \
-                 patch("sync_worker.json_sync.db.apply_message_filters", AsyncMock(return_value=(False, "caption"))), \
-                 patch("sync_worker.json_sync.update_state_and_check_skip", AsyncMock(return_value=False)), \
-                 patch("sync_worker.json_sync.record_success", AsyncMock()), \
-                 patch("sync_worker.json_sync.bot_engine.aiogram_bot") as mock_bot:
+            with patch("sync_worker.json_import.process.resolve_chat_id", AsyncMock(return_value=-100456)), \
+                 patch("sync_worker.json_import.process.build_link_rewrite_context", AsyncMock(return_value={})), \
+                 patch("sync_worker.json_import.process.db.get_all_settings", AsyncMock(return_value={"sync_photo": "0"})), \
+                 patch("sync_worker.json_import.process.db.add_msg_log", AsyncMock()) as mock_add_msg_log, \
+                 patch("sync_worker.json_import.process.db.apply_message_filters", AsyncMock(return_value=(False, "caption"))), \
+                 patch("sync_worker.json_import.process.update_state_and_check_skip", AsyncMock(return_value=False)), \
+                 patch("sync_worker.json_import.process.record_success", AsyncMock()), \
+                 patch("sync_worker.json_import.process.bot_engine.aiogram_bot") as mock_bot:
                 mock_bot.send_photo = AsyncMock(return_value=FakeSentMessage(1001))
 
                 await json_sync.process_json_sync("bot", "@target", str(json_path), 0.5, False)
@@ -168,14 +168,14 @@ class JsonSyncTests(unittest.IsolatedAsyncioTestCase):
                 encoding="utf-8",
             )
 
-            with patch("sync_worker.json_sync.resolve_chat_id", AsyncMock(return_value=-100456)), \
-                 patch("sync_worker.json_sync.build_link_rewrite_context", AsyncMock(return_value={})), \
-                 patch("sync_worker.json_sync.db.get_all_settings", AsyncMock(return_value={"sync_text": "1"})), \
-                 patch("sync_worker.json_sync.db.add_msg_log", AsyncMock()) as mock_add_msg_log, \
-                 patch("sync_worker.json_sync.db.apply_message_filters", AsyncMock(return_value=(True, "blocked content"))), \
-                 patch("sync_worker.json_sync.update_state_and_check_skip", AsyncMock(return_value=False)), \
-                 patch("sync_worker.json_sync.record_success", AsyncMock()), \
-                 patch("sync_worker.json_sync.bot_engine.aiogram_bot") as mock_bot:
+            with patch("sync_worker.json_import.process.resolve_chat_id", AsyncMock(return_value=-100456)), \
+                 patch("sync_worker.json_import.process.build_link_rewrite_context", AsyncMock(return_value={})), \
+                 patch("sync_worker.json_import.process.db.get_all_settings", AsyncMock(return_value={"sync_text": "1"})), \
+                 patch("sync_worker.json_import.process.db.add_msg_log", AsyncMock()) as mock_add_msg_log, \
+                 patch("sync_worker.json_import.process.db.apply_message_filters", AsyncMock(return_value=(True, "blocked content"))), \
+                 patch("sync_worker.json_import.process.update_state_and_check_skip", AsyncMock(return_value=False)), \
+                 patch("sync_worker.json_import.process.record_success", AsyncMock()), \
+                 patch("sync_worker.json_import.process.bot_engine.aiogram_bot") as mock_bot:
                 mock_bot.send_message = AsyncMock(return_value=FakeSentMessage(1002))
 
                 await json_sync.process_json_sync("bot", "@target", str(json_path), 0.5, False)
@@ -200,15 +200,29 @@ class JsonSyncTests(unittest.IsolatedAsyncioTestCase):
             )
 
             fake_user = type("FakeUser", (), {"is_initialized": True, "send_message": AsyncMock(return_value=FakeSentMessage(1003))})()
-            with patch("sync_worker.json_sync.resolve_chat_id", AsyncMock(return_value=-100456)), \
-                 patch("sync_worker.json_sync.build_link_rewrite_context", AsyncMock(return_value={})), \
-                 patch("sync_worker.json_sync.db.get_all_settings", AsyncMock(return_value={"sync_text": "1"})), \
-                 patch("sync_worker.json_sync.db.add_msg_log", AsyncMock()), \
-                 patch("sync_worker.json_sync.db.apply_message_filters", AsyncMock(return_value=(False, "hello"))), \
-                 patch("sync_worker.json_sync.update_state_and_check_skip", AsyncMock(return_value=False)), \
-                 patch("sync_worker.json_sync.record_success", AsyncMock()), \
-                 patch("sync_worker.json_sync.bot_engine.pyro_user_app", fake_user), \
-                 patch("sync_worker.json_sync.bot_engine.aiogram_bot"):
+            with patch("sync_worker.json_import.process.resolve_chat_id", AsyncMock(return_value=-100456)), \
+                 patch("sync_worker.json_import.process.build_link_rewrite_context", AsyncMock(return_value={})), \
+                 patch("sync_worker.json_import.process.db.get_all_settings", AsyncMock(return_value={"sync_text": "1"})), \
+                 patch("sync_worker.json_import.process.db.add_msg_log", AsyncMock()), \
+                 patch("sync_worker.json_import.process.db.apply_message_filters", AsyncMock(return_value=(False, "hello"))), \
+                 patch("sync_worker.json_import.process.update_state_and_check_skip", AsyncMock(return_value=False)), \
+                 patch("sync_worker.json_import.process.record_success", AsyncMock()), \
+                 patch("sync_worker.json_import.process.bot_engine.pyro_user_app", fake_user), \
+                 patch("sync_worker.json_import.process.bot_engine.aiogram_bot"):
                 await json_sync.process_json_sync("user", "@target", str(json_path), 0.5, False)
 
             fake_user.send_message.assert_awaited_once()
+
+    async def test_prepare_json_media_path_preserves_original_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            original = Path(temp_dir) / "photo.jpg"
+            original.write_bytes(b"abc123")
+            with patch("sync_worker.json_import.process.TEMP_DIR", temp_dir), \
+                 patch("sync_worker.json_import.process.db.add_msg_log", AsyncMock()):
+                prepared_path, created_temp = await json_sync._prepare_json_media_path(str(original), "photo", 11, True)
+
+            self.assertTrue(created_temp)
+            self.assertNotEqual(prepared_path, str(original))
+            self.assertEqual(original.read_bytes(), b"abc123")
+            self.assertTrue(Path(prepared_path).exists())
+            self.assertGreater(Path(prepared_path).stat().st_size, original.stat().st_size)

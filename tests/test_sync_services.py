@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, patch
 
 import bot_engine
 from services import sync_services
-from sync_worker import history
+from sync_worker.clone import process as history
 
 
 class FakeChat:
@@ -54,9 +54,9 @@ class SyncServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(speed, 5.0)
 
     async def test_process_master_sync_json_does_not_require_source_id(self):
-        with patch("sync_worker.history.db.get_all_settings", AsyncMock(return_value={})), \
-             patch("sync_worker.history.resolve_chat_id", AsyncMock(return_value=-100456)) as mock_resolve, \
-             patch("sync_worker.history.process_json_sync", AsyncMock()) as mock_process_json:
+        with patch("sync_worker.clone.process.db.get_all_settings", AsyncMock(return_value={})), \
+             patch("sync_worker.clone.process.resolve_chat_id", AsyncMock(return_value=-100456)) as mock_resolve, \
+             patch("sync_worker.clone.process.process_json_sync", AsyncMock()) as mock_process_json:
             await history.process_master_sync("json", "bot", "", "@target", 1, 0, 0, "fake.json", False, "", 3)
 
         mock_process_json.assert_awaited_once()
@@ -101,10 +101,10 @@ class SyncServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("78_", path_b)
 
     async def test_process_master_sync_logs_completion(self):
-        with patch("sync_worker.history.db.get_all_settings", AsyncMock(return_value={})), \
-             patch("sync_worker.history.resolve_chat_id", AsyncMock(return_value=-100456)), \
-             patch("sync_worker.history.process_json_sync", AsyncMock()), \
-             patch("sync_worker.history.db.add_log", AsyncMock()) as mock_add_log:
+        with patch("sync_worker.clone.process.db.get_all_settings", AsyncMock(return_value={})), \
+             patch("sync_worker.clone.process.resolve_chat_id", AsyncMock(return_value=-100456)), \
+             patch("sync_worker.clone.process.process_json_sync", AsyncMock()), \
+             patch("sync_worker.clone.process.db.add_log", AsyncMock()) as mock_add_log:
             await history.process_master_sync("json", "bot", "", "@target", 1, 0, 0, "fake.json", False, "", 3)
 
         mock_add_log.assert_any_await("INFO", "任务运行完毕：JSON | 已处理 0 / 0 | 跳过 0")

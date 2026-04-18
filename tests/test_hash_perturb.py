@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from sync_worker.hash_perturb import perturb_clone_media
+from sync_worker.media.hash_perturb import perturb_clone_media
 
 
 class HashPerturbTests(unittest.TestCase):

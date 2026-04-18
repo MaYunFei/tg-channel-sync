@@ -1,6 +1,6 @@
 import unittest
 
-from sync_worker.common import build_json_text, normalize_bot_html, resolve_json_media
+from sync_worker.core import build_json_text, normalize_bot_html, resolve_json_media
 
 
 class JsonCommonTests(unittest.TestCase):

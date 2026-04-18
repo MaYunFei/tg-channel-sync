@@ -3,19 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import re
-import time
 
 from aiogram.types import FSInputFile
-from aiogram.types import InputMediaAudio as AioMediaAudio
-from aiogram.types import InputMediaDocument as AioMediaDocument
-from aiogram.types import InputMediaPhoto as AioMediaPhoto
-from aiogram.types import InputMediaVideo as AioMediaVideo
 from pyrogram.enums import ParseMode
-from pyrogram.types import InputMediaAudio
-from pyrogram.types import InputMediaDocument
-from pyrogram.types import InputMediaPhoto
-from pyrogram.types import InputMediaVideo
 
 import bot_engine
 import database as db
@@ -30,162 +20,38 @@ from services.sync_services import (
     rewrite_message_links,
     safe_execute,
 )
-from .common import (
+from ..core import (
     UploadProgressTracker as SharedUploadProgressTracker,
     build_json_text,
     build_pyro_progress_callback,
     get_msg_meta,
     get_reply_source_msg_id,
-    resolve_clone_upload_target,
     resolve_json_media,
 )
-from .state import record_success, sync_state, update_state_and_check_skip
-
-
-JSON_GROUP_MEDIA_TYPES = {"photo", "video", "animation", "audio", "document"}
-JSON_MEDIA_GROUP_WINDOW_SECONDS = 3
-RETRY_AFTER_RE = re.compile(r"retry after\s+(?P<seconds>\d+)", re.IGNORECASE)
-JSON_UPLOAD_LABELS = {
-    "photo": "上传图片",
-    "video": "上传视频",
-    "animation": "上传动图",
-    "audio": "上传音频",
-    "voice": "上传语音",
-    "sticker": "上传贴纸",
-    "document": "上传文件",
-}
-
-
-class JsonSyncFatalError(RuntimeError):
-    pass
-
-
-class UploadProgressTracker:
-    def __init__(self, label: str, total_bytes: int):
-        self.label = label
-        self.total_bytes = max(1, int(total_bytes or 0))
-        self.sent_bytes = 0
-        self.started_at = time.time()
-        self.last_update_at = 0.0
-
-    def advance(self, chunk_size: int, file_label: str) -> None:
-        self.sent_bytes += max(0, int(chunk_size or 0))
-        now = time.time()
-        if self.sent_bytes < self.total_bytes and now - self.last_update_at < 0.2:
-            return
-        elapsed = max(0.001, now - self.started_at)
-        percent = min(100.0, self.sent_bytes / self.total_bytes * 100)
-        sent_mb = self.sent_bytes / (1024 * 1024)
-        total_mb = self.total_bytes / (1024 * 1024)
-        speed_mb = sent_mb / elapsed
-        sync_state["current_text"] = (
-            f"{file_label}\n{self.label} {percent:.1f}% ({sent_mb:.1f}/{total_mb:.1f} MB, {speed_mb:.1f} MB/s)"
-        )
-        self.last_update_at = now
-
-
-class ProgressFSInputFile(FSInputFile):
-    def __init__(self, path: str, tracker: UploadProgressTracker, file_label: str, filename: str | None = None):
-        super().__init__(path, filename=filename)
-        self.tracker = tracker
-        self.file_label = file_label
-
-    async def read(self, bot):
-        async for chunk in super().read(bot):
-            self.tracker.advance(len(chunk), self.file_label)
-            yield chunk
-
-
-PYRO_JSON_MEDIA_CLS = {
-    "photo": InputMediaPhoto,
-    "video": InputMediaVideo,
-    "animation": InputMediaVideo,
-    "audio": InputMediaAudio,
-    "document": InputMediaDocument,
-}
-
-
-def _json_message_timestamp(msg: dict) -> int:
-    try:
-        return int(msg.get("date_unixtime") or 0)
-    except (TypeError, ValueError):
-        return 0
-
-
-def _json_group_family(msg: dict) -> str | None:
-    msg_type, _ = get_msg_meta(msg, "json")
-    if msg_type in {"photo", "video", "animation"}:
-        return "visual"
-    if msg_type == "audio":
-        return "audio"
-    if msg_type == "document":
-        return "document"
-    return None
-
-
-def _format_media_label(media_type: str | None, media_path: str, *, index: int | None = None, total: int | None = None) -> str:
-    action = JSON_UPLOAD_LABELS.get(str(media_type or ""), "上传媒体")
-    name = os.path.basename(media_path)
-    if index is not None and total is not None:
-        return f"{action} {index}/{total}: {name}"
-    return f"{action}: {name}"
-
-
-def _parse_retry_after_seconds(exc: Exception) -> int | None:
-    match = RETRY_AFTER_RE.search(str(exc))
-    if not match:
-        return None
-    return max(1, int(match.group("seconds")))
-
-
-def _is_request_entity_too_large(exc: Exception) -> bool:
-    return "request entity too large" in str(exc).lower()
-
-
-def _json_should_fallback_to_user(sender: str, clone_fallback_to_user: bool) -> bool:
-    return sender == "bot" and bool(clone_fallback_to_user)
-
-
-async def _execute_with_retry(coro_factory, *, action_label: str, max_attempts: int = 3):
-    attempt = 0
-    while True:
-        attempt += 1
-        try:
-            return await safe_execute(coro_factory(), sync_state)
-        except Exception as exc:
-            if sync_state["stop_requested"]:
-                raise
-            retry_after = _parse_retry_after_seconds(exc)
-            if retry_after is not None:
-                await db.add_msg_log("JSON_RETRY", f"{action_label} | 遇到频控，等待 {retry_after + 1} 秒后重试")
-                await asyncio.sleep(retry_after + 1)
-                continue
-            if attempt >= max_attempts:
-                raise
-            await asyncio.sleep(2)
-
-
-async def _select_json_upload_target(
-    sender: str,
-    file_sizes,
-    *,
-    clone_fallback_to_user: bool,
-    wait_for_available_bot: bool = True,
-):
-    return await safe_execute(
-        resolve_clone_upload_target(
-            sender,
-            bot_engine.pyro_user_app,
-            file_sizes,
-            allow_user_fallback=_json_should_fallback_to_user(sender, clone_fallback_to_user),
-            wait_for_available_bot=wait_for_available_bot,
-        ),
-        sync_state,
-    )
+from ..media import prepare_json_media_for_send
+from ..runtime import TEMP_DIR, record_success, sync_state, update_state_and_check_skip
+from ..senders import build_bot_media_group, build_user_media_group
+from .grouping import _json_group_family, group_json_messages
+from .helpers import (
+    JSON_MEDIA_GROUP_WINDOW_SECONDS,
+    JsonSyncFatalError,
+    ProgressFSInputFile,
+    UploadProgressTracker,
+    _format_media_label,
+    _is_request_entity_too_large,
+    _json_should_fallback_to_user,
+    _parse_retry_after_seconds,
+    _select_json_upload_target,
+    _execute_with_retry,
+)
 
 
 def _pyro_file_ref(media_path: str) -> str:
     return media_path
+
+
+async def _prepare_json_media_path(media_path: str, media_type: str, msg_id: int, hash_perturb: bool) -> tuple[str, bool]:
+    return await prepare_json_media_for_send(media_path, media_type, msg_id, hash_perturb, temp_dir=TEMP_DIR)
 
 
 async def _send_json_single_via_user(target_id, media_type, media_path, caption, reply_to_id, tracker, file_label):
@@ -225,20 +91,16 @@ async def _send_json_group_via_user(group, target_id, rewritten_captions, file_e
         raise JsonSyncFatalError("Bot 上传体积超限，且辅助账号未登录，无法回退发送媒体组")
     total_bytes = sum(os.path.getsize(path) for _, path, _ in file_entries)
     tracker = SharedUploadProgressTracker("上传媒体组 [辅助账号回退]", total_bytes)
-    media = []
     group_family = _json_group_family(group[0])
+    normalized_captions = []
+    group_items = []
     for index, ((item, media_path, media_type), caption_html) in enumerate(zip(file_entries, rewritten_captions), start=1):
-        media_cls = PYRO_JSON_MEDIA_CLS.get(media_type, InputMediaDocument)
         caption = caption_html if caption_html else None
         if group_family == "visual" and index > 1:
             caption = None
-        media.append(
-            media_cls(
-                media=media_path,
-                caption=caption,
-                parse_mode=ParseMode.HTML,
-            )
-        )
+        normalized_captions.append(caption)
+        group_items.append((item, media_path, "video" if media_type == "animation" else media_type))
+    media = build_user_media_group(group_items, normalized_captions, {})
     kwargs = {"chat_id": target_id, "media": media}
     if reply_to_id:
         kwargs["reply_to_message_id"] = reply_to_id
@@ -252,82 +114,17 @@ async def _send_json_group_via_user(group, target_id, rewritten_captions, file_e
         action_label=f"媒体组 -> 辅助账号重传 [{len(file_entries)} 项]",
     )
 
-
-def _json_can_group_media(msg: dict) -> bool:
-    if msg.get("type") != "message":
-        return False
-    return (_json_group_family(msg) or "") in {"visual", "audio", "document"}
-
-
-def _json_has_caption(msg: dict) -> bool:
-    return bool(str(build_json_text(msg) or "").strip())
-
-
-def _json_should_append_to_heuristic_group(group: list[dict], msg: dict, window_seconds: int) -> bool:
-    if not group or not _json_can_group_media(msg):
-        return False
-    if _json_group_family(group[0]) != _json_group_family(msg):
-        return False
-    prev = group[-1]
-    prev_id = int(prev.get("id") or 0)
-    curr_id = int(msg.get("id") or 0)
-    if curr_id != prev_id + 1:
-        return False
-    if msg.get("reply_to_message_id"):
-        return False
-    prev_ts = _json_message_timestamp(prev)
-    curr_ts = _json_message_timestamp(msg)
-    if prev_ts and curr_ts and curr_ts - prev_ts > max(1, int(window_seconds or JSON_MEDIA_GROUP_WINDOW_SECONDS)):
-        return False
-    if _json_group_family(msg) != "visual":
-        return True
-    caption_count = sum(1 for item in group if _json_has_caption(item))
-    if _json_has_caption(msg) and caption_count >= 1:
-        return False
-    return True
-
-
-def group_json_messages(messages: list[dict], window_seconds: int) -> list[list[dict]]:
-    grouped = []
-    current_heuristic_group: list[dict] = []
-
-    def flush_heuristic_group():
-        nonlocal current_heuristic_group
-        if not current_heuristic_group:
-            return
-        if len(current_heuristic_group) == 1:
-            grouped.append([current_heuristic_group[0]])
-        else:
-            grouped.append(current_heuristic_group)
-        current_heuristic_group = []
-
-    for msg in messages:
-        explicit_group_id = msg.get("media_group_id") or msg.get("grouped_id") or msg.get("media_group")
-        if explicit_group_id:
-            flush_heuristic_group()
-            if grouped and len(grouped[-1]) > 0:
-                prev_explicit = grouped[-1][0].get("media_group_id") or grouped[-1][0].get("grouped_id") or grouped[-1][0].get("media_group")
-                if prev_explicit == explicit_group_id:
-                    grouped[-1].append(msg)
-                    continue
-            grouped.append([msg])
-            continue
-
-        if _json_should_append_to_heuristic_group(current_heuristic_group, msg, window_seconds):
-            current_heuristic_group.append(msg)
-            continue
-
-        flush_heuristic_group()
-        if _json_can_group_media(msg):
-            current_heuristic_group = [msg]
-        else:
-            grouped.append([msg])
-
-    flush_heuristic_group()
-    return grouped
-
-
-async def send_json_media_group(group, target_id, json_dir, source_scope_id, force_send, link_context, sender: str, clone_fallback_to_user: bool):
+async def send_json_media_group(
+    group,
+    target_id,
+    json_dir,
+    source_scope_id,
+    force_send,
+    link_context,
+    sender: str,
+    clone_fallback_to_user: bool,
+    hash_perturb: bool = False,
+):
     group_ids = [int(item.get("id") or 0) for item in group]
     first_msg = group[0]
     first_id = group_ids[0] if group_ids else 0
@@ -341,12 +138,16 @@ async def send_json_media_group(group, target_id, json_dir, source_scope_id, for
     group_family = _json_group_family(first_msg)
 
     file_entries = []
+    prepared_temp_paths = []
     for index, item in enumerate(group):
         item_id = int(item.get("id") or 0)
         media_path, media_type, _ = resolve_json_media(item, json_dir)
         if not media_path or not os.path.exists(media_path):
             await db.add_msg_log("JSON_MEDIA_MISSING", f"消息ID:{item_id} | 媒体组文件不存在，已回退为逐条发送")
             return None
+        media_path, created_temp = await _prepare_json_media_path(media_path, media_type, item_id, hash_perturb)
+        if created_temp:
+            prepared_temp_paths.append(media_path)
         total_bytes += os.path.getsize(media_path)
         file_entries.append((item, media_path, media_type))
 
@@ -378,26 +179,16 @@ async def send_json_media_group(group, target_id, json_dir, source_scope_id, for
         for _ in range(3):
             if sync_state["stop_requested"]:
                 break
-            tracker = UploadProgressTracker(f"上传媒体组 [{upload_target['label']}]", total_bytes)
-            media_list = []
+            normalized_captions = []
+            group_items = []
             for index, (item, media_path, media_type) in enumerate(file_entries):
                 caption_html = rewritten_captions[index]
                 caption = caption_html if caption_html else None
                 if group_family == "visual" and index > 0:
                     caption = None
-                file = ProgressFSInputFile(
-                    media_path,
-                    tracker,
-                    _format_media_label(media_type, media_path, index=index + 1, total=len(group)),
-                )
-                if media_type == "photo":
-                    media_list.append(AioMediaPhoto(media=file, caption=caption, parse_mode="HTML"))
-                elif media_type in {"video", "animation"}:
-                    media_list.append(AioMediaVideo(media=file, caption=caption, parse_mode="HTML"))
-                elif media_type == "audio":
-                    media_list.append(AioMediaAudio(media=file, caption=caption, parse_mode="HTML"))
-                else:
-                    media_list.append(AioMediaDocument(media=file, caption=caption, parse_mode="HTML"))
+                normalized_captions.append(caption)
+                group_items.append((item, media_path, "video" if media_type == "animation" else media_type))
+            tracker, media_list = build_bot_media_group(group_items, normalized_captions, {}, total_bytes, upload_target["label"])
             try:
                 sent_group = await safe_execute(
                     upload_target["client"].send_media_group(
@@ -437,18 +228,25 @@ async def send_json_media_group(group, target_id, json_dir, source_scope_id, for
             await db.add_msg_log("JSON_FALLBACK", f"组首消息ID:{first_id} | Bot 发送失败，已回退辅助账号发送媒体组")
             sent_group = await _send_json_group_via_user(group, target_id, rewritten_captions, file_entries, reply_to_id)
 
-    if sent_group is None:
-        return None
-    for original_msg, sent_msg in zip(group, sent_group):
-        new_id = sent_msg.message_id if hasattr(sent_msg, "message_id") else sent_msg.id
-        sent_ids.append(new_id)
-        await record_success(source_scope_id, target_id, int(original_msg.get("id") or 0), new_id, force_send=force_send)
+    try:
+        if sent_group is None:
+            return None
+        for original_msg, sent_msg in zip(group, sent_group):
+            new_id = sent_msg.message_id if hasattr(sent_msg, "message_id") else sent_msg.id
+            sent_ids.append(new_id)
+            await record_success(source_scope_id, target_id, int(original_msg.get("id") or 0), new_id, force_send=force_send)
 
-    await db.add_msg_log(
-        "JSON_GROUP_SEND",
-        f"组首消息ID:{first_id} | 共 {len(group)} 条 | 目标:[{target_id}] | 已按媒体组发送",
-    )
-    return sent_ids
+        await db.add_msg_log(
+            "JSON_GROUP_SEND",
+            f"组首消息ID:{first_id} | 共 {len(group)} 条 | 目标:[{target_id}] | 已按媒体组发送",
+        )
+        return sent_ids
+    finally:
+        for temp_path in prepared_temp_paths:
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
 
 
 async def process_json_sync(
@@ -460,6 +258,7 @@ async def process_json_sync(
     json_source_username="",
     media_group_window_seconds: int = JSON_MEDIA_GROUP_WINDOW_SECONDS,
     clone_fallback_to_user: bool = True,
+    hash_perturb: bool = False,
 ):
     if not json_path or not os.path.exists(json_path):
         await log_sync_error("JSON 文件不存在或路径无效", ValueError(json_path or ""))
@@ -519,6 +318,7 @@ async def process_json_sync(
                 link_context,
                 sender,
                 clone_fallback_to_user,
+                hash_perturb,
             )
             if result is not None:
                 await asyncio.sleep(safe_delay)
@@ -577,75 +377,127 @@ async def process_json_sync(
 
             try:
                 if media_path and os.path.exists(media_path):
+                    media_path, created_temp = await _prepare_json_media_path(media_path, media_type, msg_id, hash_perturb)
                     file_size = os.path.getsize(media_path)
                     caption = text if text else None
                     file_label = _format_media_label(media_type, media_path)
-                    upload_target = await _select_json_upload_target(
-                        sender,
-                        [file_size],
-                        clone_fallback_to_user=clone_fallback_to_user,
-                        wait_for_available_bot=not _json_should_fallback_to_user(sender, clone_fallback_to_user),
-                    )
-
-                    if upload_target["sender"] == "user":
-                        sent = await _send_json_single_via_user(
-                            target_id,
-                            media_type,
-                            media_path,
-                            caption,
-                            reply_to_id,
-                            SharedUploadProgressTracker("上传中 [辅助账号回退]", file_size),
-                            file_label,
+                    try:
+                        upload_target = await _select_json_upload_target(
+                            sender,
+                            [file_size],
+                            clone_fallback_to_user=clone_fallback_to_user,
+                            wait_for_available_bot=not _json_should_fallback_to_user(sender, clone_fallback_to_user),
                         )
-                    else:
-                        sent = None
-                        for _ in range(3):
-                            if sync_state["stop_requested"]:
-                                break
-                            tracker = UploadProgressTracker(f"上传中 [{upload_target['label']}]", file_size)
-                            file = ProgressFSInputFile(media_path, tracker, file_label)
-                            try:
-                                if media_type == "photo":
-                                    send_coro = lambda: upload_target["client"].send_photo(
-                                        target_id, file, caption=caption, parse_mode="HTML", reply_to_message_id=reply_to_id
-                                    )
-                                elif media_type == "video":
-                                    send_coro = lambda: upload_target["client"].send_video(
-                                        target_id, file, caption=caption, parse_mode="HTML", reply_to_message_id=reply_to_id
-                                    )
-                                elif media_type == "animation":
-                                    send_coro = lambda: upload_target["client"].send_animation(
-                                        target_id, file, caption=caption, parse_mode="HTML", reply_to_message_id=reply_to_id
-                                    )
-                                elif media_type == "audio":
-                                    send_coro = lambda: upload_target["client"].send_audio(
-                                        target_id, file, caption=caption, parse_mode="HTML", reply_to_message_id=reply_to_id
-                                    )
-                                elif media_type == "voice":
-                                    send_coro = lambda: upload_target["client"].send_voice(
-                                        target_id, file, caption=caption, parse_mode="HTML", reply_to_message_id=reply_to_id
-                                    )
-                                elif media_type == "sticker":
-                                    sent = await safe_execute(
-                                        upload_target["client"].send_sticker(target_id, file, reply_to_message_id=reply_to_id),
-                                        sync_state,
-                                    )
-                                    await bot_engine.note_upload_success(upload_target["client"], file_size)
-                                    break
-                                else:
-                                    send_coro = lambda: upload_target["client"].send_document(
-                                        target_id, file, caption=caption, parse_mode="HTML", reply_to_message_id=reply_to_id
-                                    )
-                                if media_type != "sticker":
-                                    sent = await safe_execute(send_coro(), sync_state)
-                                    await bot_engine.note_upload_success(upload_target["client"], file_size)
-                                    break
-                            except Exception as exc:
+
+                        if upload_target["sender"] == "user":
+                            sent = await _send_json_single_via_user(
+                                target_id,
+                                media_type,
+                                media_path,
+                                caption,
+                                reply_to_id,
+                                SharedUploadProgressTracker("上传中 [辅助账号回退]", file_size),
+                                file_label,
+                            )
+                        else:
+                            sent = None
+                            for _ in range(3):
                                 if sync_state["stop_requested"]:
-                                    raise
-                                if media_type == "sticker":
-                                    thumb = str(msg.get("thumbnail") or "")
-                                    thumb_path = os.path.join(json_dir, thumb) if thumb else ""
+                                    break
+                                tracker = UploadProgressTracker(f"上传中 [{upload_target['label']}]", file_size)
+                                file = ProgressFSInputFile(media_path, tracker, file_label)
+                                try:
+                                    if media_type == "photo":
+                                        send_coro = lambda: upload_target["client"].send_photo(
+                                            target_id, file, caption=caption, parse_mode="HTML", reply_to_message_id=reply_to_id
+                                        )
+                                    elif media_type == "video":
+                                        send_coro = lambda: upload_target["client"].send_video(
+                                            target_id, file, caption=caption, parse_mode="HTML", reply_to_message_id=reply_to_id
+                                        )
+                                    elif media_type == "animation":
+                                        send_coro = lambda: upload_target["client"].send_animation(
+                                            target_id, file, caption=caption, parse_mode="HTML", reply_to_message_id=reply_to_id
+                                        )
+                                    elif media_type == "audio":
+                                        send_coro = lambda: upload_target["client"].send_audio(
+                                            target_id, file, caption=caption, parse_mode="HTML", reply_to_message_id=reply_to_id
+                                        )
+                                    elif media_type == "voice":
+                                        send_coro = lambda: upload_target["client"].send_voice(
+                                            target_id, file, caption=caption, parse_mode="HTML", reply_to_message_id=reply_to_id
+                                        )
+                                    elif media_type == "sticker":
+                                        sent = await safe_execute(
+                                            upload_target["client"].send_sticker(target_id, file, reply_to_message_id=reply_to_id),
+                                            sync_state,
+                                        )
+                                        await bot_engine.note_upload_success(upload_target["client"], file_size)
+                                        break
+                                    else:
+                                        send_coro = lambda: upload_target["client"].send_document(
+                                            target_id, file, caption=caption, parse_mode="HTML", reply_to_message_id=reply_to_id
+                                        )
+                                    if media_type != "sticker":
+                                        sent = await safe_execute(send_coro(), sync_state)
+                                        await bot_engine.note_upload_success(upload_target["client"], file_size)
+                                        break
+                                except Exception as exc:
+                                    if sync_state["stop_requested"]:
+                                        raise
+                                    if media_type == "sticker":
+                                        thumb = str(msg.get("thumbnail") or "")
+                                        thumb_path = os.path.join(json_dir, thumb) if thumb else ""
+                                        if _is_request_entity_too_large(exc):
+                                            if _json_should_fallback_to_user(sender, clone_fallback_to_user):
+                                                await db.add_msg_log("JSON_FALLBACK", f"消息ID:{msg_id} | Bot 上传体积超限，已回退辅助账号发送")
+                                                sent = await _send_json_single_via_user(
+                                                    target_id,
+                                                    media_type,
+                                                    media_path,
+                                                    caption,
+                                                    reply_to_id,
+                                                    SharedUploadProgressTracker("上传中 [辅助账号回退]", file_size),
+                                                    file_label,
+                                                )
+                                                break
+                                            raise
+                                        retry_after = _parse_retry_after_seconds(exc)
+                                        if retry_after is not None:
+                                            await bot_engine.mark_upload_bot_cooldown(upload_target["client"], retry_after + 1, f"JSON 消息ID:{msg_id}")
+                                            upload_target = await _select_json_upload_target(
+                                                sender,
+                                                [file_size],
+                                                clone_fallback_to_user=clone_fallback_to_user,
+                                                wait_for_available_bot=not _json_should_fallback_to_user(sender, clone_fallback_to_user),
+                                            )
+                                            if upload_target["sender"] == "user":
+                                                await db.add_msg_log("JSON_FALLBACK", f"消息ID:{msg_id} | Bot 频控，已切换辅助账号发送")
+                                                sent = await _send_json_single_via_user(
+                                                    target_id,
+                                                    media_type,
+                                                    media_path,
+                                                    caption,
+                                                    reply_to_id,
+                                                    SharedUploadProgressTracker("上传中 [辅助账号回退]", file_size),
+                                                    file_label,
+                                                )
+                                                break
+                                            continue
+                                        if not thumb_path or not os.path.exists(thumb_path):
+                                            raise
+                                        await db.add_msg_log("JSON_STICKER_AS_IMAGE", f"消息ID:{msg_id} | 贴纸发送失败，已回退为缩略图图片发送: {exc}")
+                                        sent = await _execute_with_retry(
+                                            lambda: bot_engine.aiogram_bot.send_photo(
+                                                target_id,
+                                                FSInputFile(thumb_path),
+                                                caption=caption,
+                                                parse_mode="HTML",
+                                                reply_to_message_id=reply_to_id,
+                                            ),
+                                            action_label=f"贴纸缩略图回退 [{msg_id}]",
+                                        )
+                                        break
                                     if _is_request_entity_too_large(exc):
                                         if _json_should_fallback_to_user(sender, clone_fallback_to_user):
                                             await db.add_msg_log("JSON_FALLBACK", f"消息ID:{msg_id} | Bot 上传体积超限，已回退辅助账号发送")
@@ -682,71 +534,27 @@ async def process_json_sync(
                                             )
                                             break
                                         continue
-                                    if not thumb_path or not os.path.exists(thumb_path):
-                                        raise
-                                    await db.add_msg_log("JSON_STICKER_AS_IMAGE", f"消息ID:{msg_id} | 贴纸发送失败，已回退为缩略图图片发送: {exc}")
-                                    sent = await _execute_with_retry(
-                                        lambda: bot_engine.aiogram_bot.send_photo(
-                                            target_id,
-                                            FSInputFile(thumb_path),
-                                            caption=caption,
-                                            parse_mode="HTML",
-                                            reply_to_message_id=reply_to_id,
-                                        ),
-                                        action_label=f"贴纸缩略图回退 [{msg_id}]",
-                                    )
-                                    break
-                                if _is_request_entity_too_large(exc):
-                                    if _json_should_fallback_to_user(sender, clone_fallback_to_user):
-                                        await db.add_msg_log("JSON_FALLBACK", f"消息ID:{msg_id} | Bot 上传体积超限，已回退辅助账号发送")
-                                        sent = await _send_json_single_via_user(
-                                            target_id,
-                                            media_type,
-                                            media_path,
-                                            caption,
-                                            reply_to_id,
-                                            SharedUploadProgressTracker("上传中 [辅助账号回退]", file_size),
-                                            file_label,
-                                        )
-                                        break
                                     raise
-                                retry_after = _parse_retry_after_seconds(exc)
-                                if retry_after is not None:
-                                    await bot_engine.mark_upload_bot_cooldown(upload_target["client"], retry_after + 1, f"JSON 消息ID:{msg_id}")
-                                    upload_target = await _select_json_upload_target(
-                                        sender,
-                                        [file_size],
-                                        clone_fallback_to_user=clone_fallback_to_user,
-                                        wait_for_available_bot=not _json_should_fallback_to_user(sender, clone_fallback_to_user),
-                                    )
-                                    if upload_target["sender"] == "user":
-                                        await db.add_msg_log("JSON_FALLBACK", f"消息ID:{msg_id} | Bot 频控，已切换辅助账号发送")
-                                        sent = await _send_json_single_via_user(
-                                            target_id,
-                                            media_type,
-                                            media_path,
-                                            caption,
-                                            reply_to_id,
-                                            SharedUploadProgressTracker("上传中 [辅助账号回退]", file_size),
-                                            file_label,
-                                        )
-                                        break
-                                    continue
-                                raise
-                        if sent is None and not sync_state["stop_requested"] and _json_should_fallback_to_user(sender, clone_fallback_to_user):
-                            await db.add_msg_log("JSON_FALLBACK", f"消息ID:{msg_id} | Bot 发送失败，已回退辅助账号发送")
-                            sent = await _send_json_single_via_user(
-                                target_id,
-                                media_type,
-                                media_path,
-                                caption,
-                                reply_to_id,
-                                SharedUploadProgressTracker("上传中 [辅助账号回退]", file_size),
-                                file_label,
-                            )
-                        if sent is None:
-                            return
-                    sent_id = sent.message_id if hasattr(sent, "message_id") else sent.id
+                            if sent is None and not sync_state["stop_requested"] and _json_should_fallback_to_user(sender, clone_fallback_to_user):
+                                await db.add_msg_log("JSON_FALLBACK", f"消息ID:{msg_id} | Bot 发送失败，已回退辅助账号发送")
+                                sent = await _send_json_single_via_user(
+                                    target_id,
+                                    media_type,
+                                    media_path,
+                                    caption,
+                                    reply_to_id,
+                                    SharedUploadProgressTracker("上传中 [辅助账号回退]", file_size),
+                                    file_label,
+                                )
+                            if sent is None:
+                                return
+                        sent_id = sent.message_id if hasattr(sent, "message_id") else sent.id
+                    finally:
+                        if created_temp:
+                            try:
+                                os.remove(media_path)
+                            except Exception:
+                                pass
                 elif text:
                     upload_target = await _select_json_upload_target(
                         sender,

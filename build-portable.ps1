@@ -1,42 +1,115 @@
 $ErrorActionPreference = "Stop"
 
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+function Compress-DirectoryWithRetry {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SourceDir,
+        [Parameter(Mandatory = $true)]
+        [string]$DestinationZip,
+        [int]$MaxAttempts = 5,
+        [int]$DelaySeconds = 2
+    )
+
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        try {
+            if (Test-Path $DestinationZip) {
+                Remove-Item -LiteralPath $DestinationZip -Force
+            }
+            [System.IO.Compression.ZipFile]::CreateFromDirectory($SourceDir, $DestinationZip)
+            return
+        } catch {
+            if ($attempt -ge $MaxAttempts) {
+                throw
+            }
+            Write-Host "Archive retry $attempt/$MaxAttempts failed for $DestinationZip. Waiting $DelaySeconds seconds..."
+            Start-Sleep -Seconds $DelaySeconds
+        }
+    }
+}
+
+function Remove-PathWithRetry {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [switch]$Recurse,
+        [int]$MaxAttempts = 5,
+        [int]$DelaySeconds = 2
+    )
+
+    if (-not (Test-Path $Path)) {
+        return
+    }
+
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        try {
+            if ($Recurse) {
+                Remove-Item -LiteralPath $Path -Recurse -Force
+            } else {
+                Remove-Item -LiteralPath $Path -Force
+            }
+            return
+        } catch {
+            if ($attempt -ge $MaxAttempts) {
+                throw
+            }
+            Write-Host "Delete retry $attempt/$MaxAttempts failed for $Path. Waiting $DelaySeconds seconds..."
+            Start-Sleep -Seconds $DelaySeconds
+        }
+    }
+}
+
+function Remove-PathBestEffort {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [switch]$Recurse
+    )
+
+    try {
+        if ($Recurse) {
+            Remove-PathWithRetry -Path $Path -Recurse
+        } else {
+            Remove-PathWithRetry -Path $Path
+        }
+    } catch {
+        Write-Warning "Cleanup skipped for ${Path}: $($_.Exception.Message)"
+    }
+}
+
 $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $ProjectRoot
 
 $Version = (Get-Content -LiteralPath (Join-Path $ProjectRoot "VERSION") -Raw).Trim()
 if (-not $Version) {
-    throw "VERSION 文件为空，无法生成发布包名称。"
+    throw "VERSION file is empty. Cannot build release package name."
 }
 
 $DistRoot = Join-Path $ProjectRoot "dist-portable"
 $BuildRoot = Join-Path $ProjectRoot "build"
 $PyInstallerDist = Join-Path $ProjectRoot "dist"
+$StageRoot = Join-Path (Join-Path $ProjectRoot "temp") ("package-" + [Guid]::NewGuid().ToString("N"))
 $PortableName = "tg-channel-sync-$Version-windows-x64-portable"
-$PortableDir = Join-Path $DistRoot $PortableName
+$PortableDir = Join-Path $StageRoot $PortableName
 $PortableZipPath = Join-Path $DistRoot "$PortableName.zip"
 $FullName = "tg-channel-sync-$Version-windows-x64-full"
-$FullDir = Join-Path $DistRoot $FullName
+$FullDir = Join-Path $StageRoot $FullName
 $FullZipPath = Join-Path $DistRoot "$FullName.zip"
 $FullSourceDir = Join-Path $FullDir "app"
 $BundledVenvDir = Join-Path $FullDir "venv"
 
 if (Test-Path $BuildRoot) {
-    Remove-Item -LiteralPath $BuildRoot -Recurse -Force
+    Remove-PathBestEffort -Path $BuildRoot -Recurse
 }
 if (Test-Path $PyInstallerDist) {
-    Remove-Item -LiteralPath $PyInstallerDist -Recurse -Force
-}
-if (Test-Path $PortableDir) {
-    Remove-Item -LiteralPath $PortableDir -Recurse -Force
+    Remove-PathBestEffort -Path $PyInstallerDist -Recurse
 }
 if (Test-Path $PortableZipPath) {
-    Remove-Item -LiteralPath $PortableZipPath -Force
-}
-if (Test-Path $FullDir) {
-    Remove-Item -LiteralPath $FullDir -Recurse -Force
+    Remove-PathWithRetry -Path $PortableZipPath
 }
 if (Test-Path $FullZipPath) {
-    Remove-Item -LiteralPath $FullZipPath -Force
+    Remove-PathWithRetry -Path $FullZipPath
 }
 
 New-Item -ItemType Directory -Path $DistRoot -Force | Out-Null
@@ -48,7 +121,7 @@ if (-not (Test-Path $PyInstaller)) {
 
 & $PyInstaller --clean --noconfirm "tg-channel-sync.spec"
 if ($LASTEXITCODE -ne 0) {
-    throw "PyInstaller 构建失败，退出码: $LASTEXITCODE"
+    throw "PyInstaller build failed with exit code: $LASTEXITCODE"
 }
 
 New-Item -ItemType Directory -Path $PortableDir -Force | Out-Null
@@ -106,16 +179,14 @@ set TG_CHANNEL_SYNC_NO_BROWSER=1
 "@
 Set-Content -LiteralPath (Join-Path $FullDir "start-no-browser.bat") -Value $StartNoBrowserBat -Encoding ASCII
 
-Compress-Archive -Path $PortableDir -DestinationPath $PortableZipPath -Force
-Compress-Archive -Path $FullDir -DestinationPath $FullZipPath -Force
+Compress-DirectoryWithRetry -SourceDir $PortableDir -DestinationZip $PortableZipPath
+Compress-DirectoryWithRetry -SourceDir $FullDir -DestinationZip $FullZipPath
 
-Remove-Item -LiteralPath $PortableDir -Recurse -Force
-Remove-Item -LiteralPath $FullDir -Recurse -Force
-if (Test-Path $BuildRoot) {
-    Remove-Item -LiteralPath $BuildRoot -Recurse -Force
+if (Test-Path $StageRoot) {
+    Remove-PathBestEffort -Path $StageRoot -Recurse
 }
 if (Test-Path $PyInstallerDist) {
-    Remove-Item -LiteralPath $PyInstallerDist -Recurse -Force
+    Remove-PathBestEffort -Path $PyInstallerDist -Recurse
 }
 
 Write-Host ""
