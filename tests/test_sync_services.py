@@ -63,6 +63,7 @@ class SyncServiceTests(unittest.IsolatedAsyncioTestCase):
             (),
             {
                 "forward_from_chat": FakeNamedChat(-100123, title="原频道"),
+                "forward_from_message_id": 321,
                 "forward_from": None,
                 "forward_sender_name": None,
                 "external_reply": type(
@@ -78,9 +79,10 @@ class SyncServiceTests(unittest.IsolatedAsyncioTestCase):
 
         rendered = prepend_source_header_html("正文", msg, enabled=True)
 
-        self.assertIn('href="tg://openmessage?chat_id=-100123"', rendered)
+        self.assertIn('href="https://t.me/c/123/321"', rendered)
+        self.assertIn("#转发自", rendered)
         self.assertIn(">原频道</a>", rendered)
-        self.assertIn('href="tg://openmessage?chat_id=-100456&amp;message_id=789"', rendered)
+        self.assertIn('href="https://t.me/c/456/789"', rendered)
         self.assertTrue(rendered.endswith("\n正文"))
 
     def test_prepend_source_header_html_supports_json_forwarded_channel_peer(self):
@@ -89,11 +91,13 @@ class SyncServiceTests(unittest.IsolatedAsyncioTestCase):
             {
                 "forwarded_from": "333频道",
                 "forwarded_from_id": "channel3912522050",
+                "forwarded_from_message_id": "66",
             },
             enabled=True,
         )
 
-        self.assertIn('href="tg://openmessage?chat_id=-1003912522050"', rendered)
+        self.assertIn('href="https://t.me/c/3912522050/66"', rendered)
+        self.assertIn("#转发自", rendered)
         self.assertIn(">333频道</a>", rendered)
 
     def test_compute_progress_speed_uses_delta(self):
@@ -183,3 +187,88 @@ class SyncServiceTests(unittest.IsolatedAsyncioTestCase):
             mock_add_msg_log.assert_awaited()
         finally:
             bot_engine.upload_bots = original_upload_bots
+
+    async def test_rewrite_media_group_captions_adds_header_only_to_first_caption(self):
+        """测试媒体组转发信息：有文字的在文字上加，没有文字的在第一个媒体上加"""
+        from sync_worker.core.links import rewrite_media_group_captions
+        
+        # 测试场景1：第一个没有 caption，第二个有 caption，第三个也有 caption
+        # 应该只在第二个（第一个有文字的）上添加转发信息
+        group1 = [
+            type("Msg", (), {
+                "caption": None,
+                "forward_from_chat": FakeNamedChat(-100123, title="源频道"),
+                "forward_from_message_id": 100,
+                "forward_from": None,
+                "forward_sender_name": None,
+            })(),
+            type("Msg", (), {
+                "caption": type("Caption", (), {"html": "第一条说明"})(),
+                "forward_from_chat": FakeNamedChat(-100123, title="源频道"),
+                "forward_from_message_id": 101,
+                "forward_from": None,
+                "forward_sender_name": None,
+            })(),
+            type("Msg", (), {
+                "caption": type("Caption", (), {"html": "第二条说明"})(),
+                "forward_from_chat": FakeNamedChat(-100123, title="源频道"),
+                "forward_from_message_id": 102,
+                "forward_from": None,
+                "forward_sender_name": None,
+            })(),
+        ]
+        
+        with patch("sync_worker.core.links.bot_engine.aiogram_bot", FakeBot()):
+            captions1, changed1, _ = await rewrite_media_group_captions(
+                -100123, -100456, group1, include_external_source_header=True
+            )
+        
+        # 第一个媒体没有 caption，应该返回空字符串
+        self.assertEqual(captions1[0], "")
+        
+        # 第二个媒体有 caption，应该添加转发信息
+        self.assertIn("#转发自", captions1[1])
+        self.assertIn("源频道", captions1[1])
+        self.assertIn("第一条说明", captions1[1])
+        
+        # 第三个媒体有 caption，但不应该添加转发信息（避免 TG 隐藏文字介绍）
+        self.assertNotIn("#转发自", captions1[2])
+        self.assertIn("第二条说明", captions1[2])
+        
+        # 应该标记为已改变
+        self.assertTrue(changed1)
+        
+        # 测试场景2：所有媒体都没有 caption
+        # 应该在第一个媒体上添加转发信息
+        group2 = [
+            type("Msg", (), {
+                "caption": None,
+                "forward_from_chat": FakeNamedChat(-100123, title="源频道"),
+                "forward_from_message_id": 200,
+                "forward_from": None,
+                "forward_sender_name": None,
+            })(),
+            type("Msg", (), {
+                "caption": None,
+                "forward_from_chat": FakeNamedChat(-100123, title="源频道"),
+                "forward_from_message_id": 201,
+                "forward_from": None,
+                "forward_sender_name": None,
+            })(),
+        ]
+        
+        with patch("sync_worker.core.links.bot_engine.aiogram_bot", FakeBot()):
+            captions2, changed2, _ = await rewrite_media_group_captions(
+                -100123, -100456, group2, include_external_source_header=True
+            )
+        
+        # 第一个媒体应该添加转发信息（因为没有任何媒体有文字）
+        self.assertIn("#转发自", captions2[0])
+        self.assertIn("源频道", captions2[0])
+        
+        # 第二个媒体不应该添加转发信息
+        self.assertNotIn("#转发自", captions2[1])
+        
+        # 应该标记为已改变
+        self.assertTrue(changed2)
+

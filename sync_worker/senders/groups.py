@@ -17,31 +17,73 @@ AIO_MEDIA_CLS = {"photo": AioPhoto, "video": AioVideo, "audio": AioAudio, "docum
 PYRO_MEDIA_CLS = {"photo": InputMediaPhoto, "video": InputMediaVideo, "audio": InputMediaAudio, "document": InputMediaDocument}
 
 
-def build_bot_media_group(downloaded_files, rewritten_captions, thumbnail_paths, total_bytes, label):
+def build_bot_media_group(downloaded_files, rewritten_captions, thumbnail_paths, total_bytes, label, spoiler_flags=None):
+    """
+    构建 aiogram 媒体组
+    
+    Args:
+        downloaded_files: [(item, path, item_type), ...]
+        rewritten_captions: [caption1, caption2, ...]
+        thumbnail_paths: {item_id: thumbnail_path, ...}
+        total_bytes: 总字节数
+        label: 标签
+        spoiler_flags: [bool, bool, ...] 每个媒体是否有遮罩
+    """
     tracker = UploadProgressTracker(f"上传媒体组 [{label}]", total_bytes)
     media_list = []
+    spoiler_flags = spoiler_flags or []
+    
     for index, ((item, path, item_type), caption_html) in enumerate(zip(downloaded_files, rewritten_captions), start=1):
         media_cls = AIO_MEDIA_CLS.get(item_type, AIO_MEDIA_CLS["document"])
         file_label = format_upload_label(item_type, path, index=index, total=len(downloaded_files))
         media_input = ProgressFSInputFile(path, tracker, file_label)
         thumbnail_path = thumbnail_paths.get(getattr(item, "id", None) or item.get("id"))
         thumbnail_input = FSInputFile(thumbnail_path) if thumbnail_path and os.path.exists(thumbnail_path) else None
+        
         media_kwargs = {"media": media_input, "caption": caption_html, "parse_mode": "HTML"}
+        
+        # 添加媒体遮罩支持
+        if index - 1 < len(spoiler_flags) and spoiler_flags[index - 1]:
+            if item_type in {"photo", "video"}:
+                media_kwargs["has_spoiler"] = True
+        
         if item_type in {"video", "document"} and thumbnail_input is not None:
             media_kwargs["thumbnail"] = thumbnail_input
         if item_type == "video":
             media_kwargs["supports_streaming"] = True
+        
         media_list.append(media_cls(**media_kwargs))
+    
     return tracker, media_list
 
 
-def build_user_media_group(downloaded_files, rewritten_captions, thumbnail_paths):
+def build_user_media_group(downloaded_files, rewritten_captions, thumbnail_paths, spoiler_flags=None):
+    """
+    构建 pyrofork 媒体组
+    
+    Args:
+        downloaded_files: [(item, path, item_type), ...]
+        rewritten_captions: [caption1, caption2, ...]
+        thumbnail_paths: {item_id: thumbnail_path, ...}
+        spoiler_flags: [bool, bool, ...] 每个媒体是否有遮罩
+    """
     media_list = []
-    for item, path, item_type in downloaded_files:
+    spoiler_flags = spoiler_flags or []
+    
+    for index, (item, path, item_type) in enumerate(downloaded_files):
         media_cls = PYRO_MEDIA_CLS.get(item_type, PYRO_MEDIA_CLS["document"])
         thumbnail_path = thumbnail_paths.get(getattr(item, "id", None) or item.get("id"))
-        media_kwargs = {"media": path, "caption": rewritten_captions[len(media_list)], "parse_mode": ParseMode.HTML}
+        
+        media_kwargs = {"media": path, "caption": rewritten_captions[index], "parse_mode": ParseMode.HTML}
+        
+        # 添加媒体遮罩支持
+        if index < len(spoiler_flags) and spoiler_flags[index]:
+            if item_type in {"photo", "video"}:
+                media_kwargs["has_spoiler"] = True
+        
         if item_type in {"video", "document"} and thumbnail_path and os.path.exists(thumbnail_path):
             media_kwargs["thumb"] = thumbnail_path
+        
         media_list.append(media_cls(**media_kwargs))
+    
     return media_list

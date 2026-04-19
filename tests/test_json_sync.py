@@ -258,6 +258,7 @@ class JsonSyncTests(unittest.IsolatedAsyncioTestCase):
                                 "type": "message",
                                 "forwarded_from": "test_channel",
                                 "forwarded_from_id": "channel3717669322",
+                                "forwarded_from_message_id": "888",
                                 "reply_to_peer_id": "-100123",
                                 "reply_to_message_id": "456",
                                 "text": [
@@ -285,9 +286,10 @@ class JsonSyncTests(unittest.IsolatedAsyncioTestCase):
                 await json_sync.process_json_sync("bot", "@target", str(json_path), 0.5, False)
 
             sent_text = mock_bot.send_message.await_args.args[1]
-            self.assertIn('href="tg://openmessage?chat_id=-1003717669322"', sent_text)
+            self.assertIn('href="https://t.me/c/3717669322/888"', sent_text)
+            self.assertIn("#转发自", sent_text)
             self.assertIn(">test_channel</a>", sent_text)
-            self.assertIn('href="tg://openmessage?chat_id=-100123&amp;message_id=456"', sent_text)
+            self.assertIn('href="https://t.me/c/123/456"', sent_text)
             self.assertIn('<pre><code class="language-Json">{&quot;a&quot;:1}</code></pre>', sent_text)
 
     async def test_prepare_json_media_path_preserves_original_file(self):

@@ -12,6 +12,7 @@ from pyrogram.enums import ParseMode
 
 import bot_engine
 import database as db
+from app_config import get_config
 from services.sync_services import (
     build_link_rewrite_context,
     create_progress_callback,
@@ -112,7 +113,9 @@ async def sync_single_message(mode, sender, app, bot, source_id, target_id, msg,
                     )
                     sent_id = sent.id
                 await db.add_msg_log("API_QUOTE_SEND", f"原始:[{source_id}] 消息ID:{msg.id} | 已按引用回复发送")
-            elif new_html != text_html:
+            elif new_html != text_html or include_external_source_header:
+                # 如果文本发生变化，或者启用了外部来源前缀功能，使用 send_message/copy_message with caption
+                # 这样可以确保转发信息被正确处理（避免 copy_message 的不一致行为）
                 if not has_media:
                     kwargs = {"chat_id": target_id, "text": new_html, "parse_mode": ParseMode.HTML}
                     if reply_to_id:
@@ -319,21 +322,32 @@ async def sync_media_group(mode, sender, app, bot, source_id, target_id, group, 
         group,
         include_external_source_header=include_external_source_header,
     )
+    
+    # 收集媒体遮罩标志
+    from ..core import has_media_spoiler
+    spoiler_flags = []
+    for item in group:
+        item_type, _ = get_msg_meta(item, mode)
+        spoiler_flags.append(has_media_spoiler(item, item_type, mode))
 
     if mode == "api":
         for _ in range(3):
             if sync_state["stop_requested"]:
                 break
             try:
-                if captions_changed:
+                if captions_changed or any(spoiler_flags):
                     media_list = []
-                    for item, caption_html in zip(group, rewritten_captions):
+                    for item, caption_html, has_spoiler in zip(group, rewritten_captions, spoiler_flags):
                         item_type, _ = get_msg_meta(item, mode)
                         media_ref = get_media_reference(item, item_type)
                         if not media_ref:
                             raise ValueError(f"媒体组消息缺少可复用 file_id: {item.id}")
                         media_cls = PYRO_MEDIA_CLS.get(item_type, PYRO_MEDIA_CLS["document"])
-                        media_list.append(media_cls(media=media_ref, caption=caption_html, parse_mode=ParseMode.HTML))
+                        media_kwargs = {"media": media_ref, "caption": caption_html, "parse_mode": ParseMode.HTML}
+                        # 添加遮罩支持
+                        if has_spoiler and item_type in {"photo", "video"}:
+                            media_kwargs["has_spoiler"] = True
+                        media_list.append(media_cls(**media_kwargs))
                     kwargs = {"chat_id": target_id, "media": media_list}
                     if reply_to_id:
                         kwargs["reply_to_message_id"] = reply_to_id
@@ -482,10 +496,10 @@ async def sync_media_group(mode, sender, app, bot, source_id, target_id, group, 
             try:
                 group_items = [(item, path, get_msg_meta(item, mode)[0]) for item, path in downloaded_files]
                 if actual_sender == "bot":
-                    tracker, media_list = build_bot_media_group(group_items, rewritten_captions, thumbnail_paths, sum(file_sizes), upload_target["label"])
+                    tracker, media_list = build_bot_media_group(group_items, rewritten_captions, thumbnail_paths, sum(file_sizes), upload_target["label"], spoiler_flags)
                 else:
                     tracker = UploadProgressTracker(f"上传媒体组 [{upload_target['label']}]", sum(file_sizes))
-                    media_list = build_user_media_group(group_items, rewritten_captions, thumbnail_paths)
+                    media_list = build_user_media_group(group_items, rewritten_captions, thumbnail_paths, spoiler_flags)
                 send_kwargs = {"chat_id": target_id, "media": media_list}
                 if reply_to_id:
                     send_kwargs["reply_to_message_id"] = reply_to_id
@@ -554,7 +568,7 @@ async def sync_media_group(mode, sender, app, bot, source_id, target_id, group, 
             await db.add_msg_log("BOT_FALLBACK", f"原始:[{source_id}] 组首ID:{first_id} | {fallback_reason}")
             tracker = UploadProgressTracker("上传媒体组 [辅助账号回退]", sum(file_sizes))
             group_items = [(item, path, get_msg_meta(item, mode)[0]) for item, path in downloaded_files]
-            media_list = build_user_media_group(group_items, rewritten_captions, thumbnail_paths)
+            media_list = build_user_media_group(group_items, rewritten_captions, thumbnail_paths, spoiler_flags)
             send_kwargs = {"chat_id": target_id, "media": media_list}
             if reply_to_id:
                 send_kwargs["reply_to_message_id"] = reply_to_id
@@ -643,7 +657,11 @@ async def process_master_sync(
         clone_fallback_to_user,
     )
     settings = await db.get_all_settings()
-    include_external_source_header = bool(getattr(settings, "get", lambda *_: False)("add_external_source_header", False))
+    sync_config = get_config().get("sync", {})
+    include_external_source_header = bool(sync_config.get("add_external_source_header", False))
+    if not include_external_source_header:
+        legacy_value = str(getattr(settings, "get", lambda *_: "")("add_external_source_header", "") or "").strip().lower()
+        include_external_source_header = legacy_value in {"1", "true", "yes", "on"}
 
     try:
         source_id = 0 if mode == "json" else await resolve_chat_id(bot_engine.aiogram_bot, source_id_raw)

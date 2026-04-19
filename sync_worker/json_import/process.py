@@ -9,6 +9,7 @@ from pyrogram.enums import ParseMode
 
 import bot_engine
 import database as db
+from app_config import get_config
 from services.sync_services import (
     MESSAGE_LINK_RE,
     build_link_rewrite_context,
@@ -299,7 +300,11 @@ async def process_json_sync(
     warned_media_groups = False
     warned_link_rewrite = False
     settings = await db.get_all_settings()
-    include_external_source_header = bool(getattr(settings, "get", lambda *_: False)("add_external_source_header", False))
+    sync_config = get_config().get("sync", {})
+    include_external_source_header = bool(sync_config.get("add_external_source_header", False))
+    if not include_external_source_header:
+        legacy_value = str(getattr(settings, "get", lambda *_: "")("add_external_source_header", "") or "").strip().lower()
+        include_external_source_header = legacy_value in {"1", "true", "yes", "on"}
 
     media_group_window_seconds = max(1, int(media_group_window_seconds or JSON_MEDIA_GROUP_WINDOW_SECONDS))
 

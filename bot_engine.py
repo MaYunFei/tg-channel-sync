@@ -20,6 +20,7 @@ from services.sync_services import (
     resolve_reply_for_forward,
     rewrite_message_links,
 )
+from sync_worker.core.text import prepend_source_header_html
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -295,6 +296,11 @@ async def handle_new_post(message: Message):
             if mg_id in media_group_cache:
                 group = sorted(media_group_cache.pop(mg_id), key=lambda item: item.message_id)
                 quote_data = get_quote_payload(group[0])
+                
+                # 检查是否启用外部来源前缀
+                sync_config = get_config().get("sync", {})
+                include_external_source_header = bool(sync_config.get("add_external_source_header", False))
+                
                 for item in group:
                     text_html = item.html_text if item.text or item.caption else ""
                     file_name = item.document.file_name if item.document else (item.video.file_name if item.video else "")
@@ -308,24 +314,58 @@ async def handle_new_post(message: Message):
                 for target_id in target_ids:
                     reply_to_id = await resolve_reply_for_forward(source_id, target_id, group[0].message_id, getattr(group[0], "reply_to_message_id", None))
                     try:
-                        kwargs = {"chat_id": target_id, "from_chat_id": source_id, "message_ids": msg_ids}
-                        if reply_to_id:
-                            kwargs["reply_to_message_id"] = reply_to_id
-                        if quote_data and reply_to_id:
-                            kwargs["quote_text"] = quote_data["text"]
-                            if quote_data.get("entities"):
-                                kwargs["quote_entities"] = quote_data["entities"]
-                        copied_ids = await aiogram_bot.copy_messages(**kwargs)
-                        for original, copied in zip(group, copied_ids):
-                            await db.save_msg_mapping(source_id, original.message_id, target_id, copied.message_id)
-                        if quote_data and reply_to_id:
-                            await db.add_msg_log("QUOTE_GROUP_SEND", f"源频道:{source_id} | 目标频道:{target_id} | 组首消息ID:{group[0].message_id} | 已保留引用回复")
-                        await db.add_msg_log("SEND_GROUP", f"源频道:{source_id} | 目标频道:{target_id} | 媒体组消息ID:{msg_ids} | 转发成功")
+                        # 如果启用外部来源前缀，需要逐条复制并添加前缀
+                        if include_external_source_header:
+                            await db.add_msg_log("WARN", f"目标频道:{target_id} | 媒体组启用外部来源前缀，使用逐条复制模式")
+                            for item in group:
+                                try:
+                                    item_text = item.html_text if item.text or item.caption else ""
+                                    # 添加外部来源前缀
+                                    prefixed_text = prepend_source_header_html(item_text, item, enabled=True)
+                                    
+                                    kwargs = {"chat_id": target_id, "from_chat_id": source_id, "message_id": item.message_id}
+                                    if prefixed_text != item_text:
+                                        kwargs["caption"] = prefixed_text
+                                        kwargs["parse_mode"] = "HTML"
+                                    if reply_to_id:
+                                        kwargs["reply_to_message_id"] = reply_to_id
+                                    if quote_data and reply_to_id:
+                                        kwargs["quote_text"] = quote_data["text"]
+                                        if quote_data.get("entities"):
+                                            kwargs["quote_entities"] = quote_data["entities"]
+                                    copied = await aiogram_bot.copy_message(**kwargs)
+                                    await db.save_msg_mapping(source_id, item.message_id, target_id, copied.message_id)
+                                    await asyncio.sleep(1)
+                                except Exception:
+                                    pass
+                        else:
+                            # 正常的媒体组批量复制
+                            kwargs = {"chat_id": target_id, "from_chat_id": source_id, "message_ids": msg_ids}
+                            if reply_to_id:
+                                kwargs["reply_to_message_id"] = reply_to_id
+                            if quote_data and reply_to_id:
+                                kwargs["quote_text"] = quote_data["text"]
+                                if quote_data.get("entities"):
+                                    kwargs["quote_entities"] = quote_data["entities"]
+                            copied_ids = await aiogram_bot.copy_messages(**kwargs)
+                            for original, copied in zip(group, copied_ids):
+                                await db.save_msg_mapping(source_id, original.message_id, target_id, copied.message_id)
+                            if quote_data and reply_to_id:
+                                await db.add_msg_log("QUOTE_GROUP_SEND", f"源频道:{source_id} | 目标频道:{target_id} | 组首消息ID:{group[0].message_id} | 已保留引用回复")
+                            await db.add_msg_log("SEND_GROUP", f"源频道:{source_id} | 目标频道:{target_id} | 媒体组消息ID:{msg_ids} | 转发成功")
                     except Exception:
                         await db.add_msg_log("WARN", f"目标频道:{target_id} | 媒体组整组复制失败，已回退为逐条复制")
                         for item in group:
                             try:
+                                item_text = item.html_text if item.text or item.caption else ""
+                                # 如果启用外部来源前缀，添加前缀
+                                if include_external_source_header:
+                                    item_text = prepend_source_header_html(item_text, item, enabled=True)
+                                
                                 kwargs = {"chat_id": target_id, "from_chat_id": source_id, "message_id": item.message_id}
+                                if include_external_source_header and item_text != (item.html_text if item.text or item.caption else ""):
+                                    kwargs["caption"] = item_text
+                                    kwargs["parse_mode"] = "HTML"
                                 if reply_to_id:
                                     kwargs["reply_to_message_id"] = reply_to_id
                                 if quote_data and reply_to_id:
@@ -351,9 +391,19 @@ async def handle_new_post(message: Message):
     if should_skip or (not has_media and not new_html.strip()):
         await db.add_msg_log("DROP_REGEX", f"[{chat_name}] 消息ID:{message.message_id} | 已被正则过滤拦截")
         return
+    
+    # 检查是否启用外部来源前缀
+    sync_config = get_config().get("sync", {})
+    include_external_source_header = bool(sync_config.get("add_external_source_header", False))
+    
     for target_id in target_ids:
         link_context = await build_link_rewrite_context(aiogram_bot, source_id, target_id)
         target_html, rewrite_count = await rewrite_message_links(new_html, source_id, link_context)
+        
+        # 添加外部来源前缀（如果启用）
+        if include_external_source_header:
+            target_html = prepend_source_header_html(target_html, message, enabled=True)
+        
         if rewrite_count:
             await db.add_msg_log("LINK_REWRITE", f"源频道:{source_id} | 目标频道:{target_id} | 消息链接改写:{rewrite_count}处")
         reply_to_id = await resolve_reply_for_forward(source_id, target_id, message.message_id, getattr(message, "reply_to_message_id", None))

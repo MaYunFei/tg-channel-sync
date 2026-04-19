@@ -37,15 +37,17 @@ class JsonCommonTests(unittest.TestCase):
             {
                 "forwarded_from": "test_channel",
                 "forwarded_from_id": "channel3717669322",
+                "forwarded_from_message_id": "888",
                 "reply_to_peer_id": "-100123",
                 "reply_to_message_id": "456",
                 "text": "正文",
             },
             include_external_source_header=True,
         )
-        self.assertIn('href="tg://openmessage?chat_id=-1003717669322"', rendered)
+        self.assertIn('href="https://t.me/c/3717669322/888"', rendered)
+        self.assertIn("#转发自", rendered)
         self.assertIn(">test_channel</a>", rendered)
-        self.assertIn('href="tg://openmessage?chat_id=-100123&amp;message_id=456"', rendered)
+        self.assertIn('href="https://t.me/c/123/456"', rendered)
         self.assertTrue(rendered.endswith("\n正文"))
 
     def test_build_json_text_supports_expandable_blockquote(self):

@@ -28,13 +28,40 @@ async def rewrite_media_group_captions(source_id, target_id, group, source_usern
     changed = False
     total_rewrites = 0
 
-    for item in group:
-        original_caption = item.caption.html if item.caption else ""
-        original_caption = prepend_source_header_html(original_caption, item, enabled=include_external_source_header)
-        rewritten_caption, rewrite_count = await rewrite_message_links(original_caption, source_id, link_context)
-        rewritten_caption = normalize_bot_html(rewritten_caption)
-        if rewritten_caption != original_caption:
+    # 找到第一个有 caption 的媒体项索引
+    first_caption_index = None
+    for index, item in enumerate(group):
+        if item.caption and item.caption.html:
+            first_caption_index = index
+            break
+    
+    # 如果没有任何媒体有 caption，则在第一个媒体上添加转发信息
+    should_add_to_first = first_caption_index is None
+
+    for index, item in enumerate(group):
+        # 获取原始 caption
+        raw_caption = item.caption.html if item.caption else ""
+        
+        # 决定是否在当前媒体上添加外部来源前缀
+        # 规则：有文字的在文字上加（第一个有文字的），没有文字的在第一个媒体上加
+        should_add_header = include_external_source_header and (
+            (should_add_to_first and index == 0) or  # 没有任何文字时，在第一个媒体上加
+            (not should_add_to_first and index == first_caption_index)  # 有文字时，在第一个有文字的媒体上加
+        )
+        caption_with_header = prepend_source_header_html(raw_caption, item, enabled=should_add_header)
+        
+        # 如果添加了前缀，标记为已改变
+        if caption_with_header != raw_caption:
             changed = True
+        
+        # 链接改写
+        rewritten_caption, rewrite_count = await rewrite_message_links(caption_with_header, source_id, link_context)
+        rewritten_caption = normalize_bot_html(rewritten_caption)
+        
+        # 如果链接改写后有变化，也标记为已改变
+        if rewritten_caption != caption_with_header:
+            changed = True
+        
         total_rewrites += rewrite_count
         captions.append(rewritten_caption)
 

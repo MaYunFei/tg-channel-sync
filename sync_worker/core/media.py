@@ -50,6 +50,23 @@ def get_reply_source_msg_id(msg, mode):
     return getattr(msg, "reply_to_message_id", None)
 
 
+def has_media_spoiler(msg, msg_type, mode):
+    """检查消息是否有媒体遮罩（spoiler）"""
+    if mode == "json":
+        # JSON 导出格式中检查 media_type 是否包含 spoiler 标记
+        # 或者检查特定字段
+        return False  # JSON 导出通常不包含 spoiler 信息
+    
+    # aiogram/pyrofork 消息对象
+    if msg_type in ["photo", "video", "animation"]:
+        media_obj = getattr(msg, msg_type, None)
+        if media_obj:
+            # aiogram 3.x 使用 has_media_spoiler
+            return getattr(media_obj, "has_media_spoiler", False) or getattr(msg, "has_media_spoiler", False)
+    
+    return False
+
+
 def resolve_json_media(msg, json_dir):
     if msg.get("photo"):
         return os.path.join(json_dir, msg["photo"]), "photo", None
