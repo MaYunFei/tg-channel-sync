@@ -7,7 +7,9 @@
 
 **频道内容**
 
-![频道内容预览 1](https://github.com/user-attachments/assets/7d25932c-2cce-4dea-9879-fde967e2fc21 "频道内容预览 1") ![频道内容预览 2](https://github.com/user-attachments/assets/3f8fb204-08d7-44d2-8b65-16e7ae393224 "频道内容预览 2")
+![频道内容预览 1](https://github.com/user-attachments/assets/7d25932c-2cce-4dea-9879-fde967e2fc21 "频道内容预览 1") 
+<img width="1322" height="776" alt="image" src="https://github.com/user-attachments/assets/31141f35-8756-4b69-98e1-7264a5ded53b" />
+
 
 **Web页面**
 首页             |  设置
