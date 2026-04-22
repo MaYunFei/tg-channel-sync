@@ -70,7 +70,7 @@ class SyncServiceTests(unittest.IsolatedAsyncioTestCase):
                     "ExternalReply",
                     (),
                     {
-                        "chat": FakeNamedChat(-100456),
+                        "chat": FakeNamedChat(-100456, title="外部频道"),
                         "message_id": 789,
                     },
                 )(),
@@ -83,7 +83,28 @@ class SyncServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("#转发自", rendered)
         self.assertIn(">原频道</a>", rendered)
         self.assertIn('href="https://t.me/c/456/789"', rendered)
+        self.assertIn('#回复自 <a href="https://t.me/c/456/789">外部频道</a>', rendered)
         self.assertTrue(rendered.endswith("\n正文"))
+
+    def test_prepend_source_header_html_external_reply_falls_back_without_name(self):
+        msg = type(
+            "Msg",
+            (),
+            {
+                "external_reply": type(
+                    "ExternalReply",
+                    (),
+                    {
+                        "chat": FakeNamedChat(-100456),
+                        "message_id": 789,
+                    },
+                )(),
+            },
+        )()
+
+        rendered = prepend_source_header_html("正文", msg, enabled=True)
+
+        self.assertIn('#回复自 <a href="https://t.me/c/456/789">外部消息</a>', rendered)
 
     def test_prepend_source_header_html_supports_json_forwarded_channel_peer(self):
         rendered = prepend_source_header_html(

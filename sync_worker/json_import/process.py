@@ -27,6 +27,7 @@ from ..core import (
     build_pyro_progress_callback,
     get_msg_meta,
     get_reply_source_msg_id,
+    has_media_spoiler,
     resolve_json_media,
 )
 from ..media import prepare_json_media_for_send
@@ -55,16 +56,18 @@ async def _prepare_json_media_path(media_path: str, media_type: str, msg_id: int
     return await prepare_json_media_for_send(media_path, media_type, msg_id, hash_perturb, temp_dir=TEMP_DIR)
 
 
-async def _send_json_single_via_user(target_id, media_type, media_path, caption, reply_to_id, tracker, file_label):
+async def _send_json_single_via_user(target_id, media_type, media_path, caption, reply_to_id, tracker, file_label, has_spoiler=False):
     app = bot_engine.pyro_user_app
     if not getattr(app, "is_initialized", False):
         raise JsonSyncFatalError("Bot 上传体积超限，且辅助账号未登录，无法回退重传")
+    spoiler_kwargs = {"has_spoiler": True} if has_spoiler and media_type in {"photo", "video", "animation"} else {}
     return await _execute_with_retry(
         lambda: getattr(app, f"send_{media_type}", app.send_document)(
             chat_id=target_id,
             **({"sticker": _pyro_file_ref(media_path)} if media_type == "sticker" else {media_type if hasattr(app, f"send_{media_type}") else "document": _pyro_file_ref(media_path)}),
             **({} if media_type == "sticker" else {"caption": caption, "parse_mode": ParseMode.HTML}),
             **({"reply_to_message_id": reply_to_id} if reply_to_id else {}),
+            **spoiler_kwargs,
             progress=build_pyro_progress_callback(tracker, file_label, total_bytes=os.path.getsize(media_path)),
         ),
         action_label=f"消息 -> 辅助账号重传 [{os.path.basename(media_path)}]",
@@ -95,13 +98,15 @@ async def _send_json_group_via_user(group, target_id, rewritten_captions, file_e
     group_family = _json_group_family(group[0])
     normalized_captions = []
     group_items = []
+    spoiler_flags = []
     for index, ((item, media_path, media_type), caption_html) in enumerate(zip(file_entries, rewritten_captions), start=1):
         caption = caption_html if caption_html else None
         if group_family == "visual" and index > 1:
             caption = None
         normalized_captions.append(caption)
         group_items.append((item, media_path, "video" if media_type == "animation" else media_type))
-    media = build_user_media_group(group_items, normalized_captions, {})
+        spoiler_flags.append(has_media_spoiler(item, media_type, "json"))
+    media = build_user_media_group(group_items, normalized_captions, {}, spoiler_flags)
     kwargs = {"chat_id": target_id, "media": media}
     if reply_to_id:
         kwargs["reply_to_message_id"] = reply_to_id
@@ -140,6 +145,7 @@ async def send_json_media_group(
     group_family = _json_group_family(first_msg)
 
     file_entries = []
+    spoiler_flags = []
     prepared_temp_paths = []
     for index, item in enumerate(group):
         item_id = int(item.get("id") or 0)
@@ -152,6 +158,7 @@ async def send_json_media_group(
             prepared_temp_paths.append(media_path)
         total_bytes += os.path.getsize(media_path)
         file_entries.append((item, media_path, media_type))
+        spoiler_flags.append(has_media_spoiler(item, media_type, "json"))
 
         caption_html = build_json_text(item, include_external_source_header=include_external_source_header)
         caption_html, rewrite_count = await rewrite_message_links(caption_html, source_scope_id, link_context)
@@ -190,7 +197,7 @@ async def send_json_media_group(
                     caption = None
                 normalized_captions.append(caption)
                 group_items.append((item, media_path, "video" if media_type == "animation" else media_type))
-            tracker, media_list = build_bot_media_group(group_items, normalized_captions, {}, total_bytes, upload_target["label"])
+            tracker, media_list = build_bot_media_group(group_items, normalized_captions, {}, total_bytes, upload_target["label"], spoiler_flags)
             try:
                 sent_group = await safe_execute(
                     upload_target["client"].send_media_group(
@@ -389,6 +396,7 @@ async def process_json_sync(
                     file_size = os.path.getsize(media_path)
                     caption = text if text else None
                     file_label = _format_media_label(media_type, media_path)
+                    media_has_spoiler = has_media_spoiler(msg, media_type, "json")
                     try:
                         upload_target = await _select_json_upload_target(
                             sender,
@@ -406,6 +414,7 @@ async def process_json_sync(
                                 reply_to_id,
                                 SharedUploadProgressTracker("上传中 [辅助账号回退]", file_size),
                                 file_label,
+                                media_has_spoiler,
                             )
                         else:
                             sent = None
@@ -417,11 +426,11 @@ async def process_json_sync(
                                 try:
                                     if media_type == "photo":
                                         send_coro = lambda: upload_target["client"].send_photo(
-                                            target_id, file, caption=caption, parse_mode="HTML", reply_to_message_id=reply_to_id
+                                            target_id, file, caption=caption, parse_mode="HTML", reply_to_message_id=reply_to_id, has_spoiler=media_has_spoiler
                                         )
                                     elif media_type == "video":
                                         send_coro = lambda: upload_target["client"].send_video(
-                                            target_id, file, caption=caption, parse_mode="HTML", reply_to_message_id=reply_to_id
+                                            target_id, file, caption=caption, parse_mode="HTML", reply_to_message_id=reply_to_id, has_spoiler=media_has_spoiler
                                         )
                                     elif media_type == "animation":
                                         send_coro = lambda: upload_target["client"].send_animation(
@@ -467,6 +476,7 @@ async def process_json_sync(
                                                     reply_to_id,
                                                     SharedUploadProgressTracker("上传中 [辅助账号回退]", file_size),
                                                     file_label,
+                                                    media_has_spoiler,
                                                 )
                                                 break
                                             raise
@@ -489,6 +499,7 @@ async def process_json_sync(
                                                     reply_to_id,
                                                     SharedUploadProgressTracker("上传中 [辅助账号回退]", file_size),
                                                     file_label,
+                                                    media_has_spoiler,
                                                 )
                                                 break
                                             continue
@@ -517,6 +528,7 @@ async def process_json_sync(
                                                 reply_to_id,
                                                 SharedUploadProgressTracker("上传中 [辅助账号回退]", file_size),
                                                 file_label,
+                                                media_has_spoiler,
                                             )
                                             break
                                         raise
@@ -539,6 +551,7 @@ async def process_json_sync(
                                                 reply_to_id,
                                                 SharedUploadProgressTracker("上传中 [辅助账号回退]", file_size),
                                                 file_label,
+                                                media_has_spoiler,
                                             )
                                             break
                                         continue
@@ -553,6 +566,7 @@ async def process_json_sync(
                                     reply_to_id,
                                     SharedUploadProgressTracker("上传中 [辅助账号回退]", file_size),
                                     file_label,
+                                    media_has_spoiler,
                                 )
                             if sent is None:
                                 return

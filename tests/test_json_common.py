@@ -1,6 +1,6 @@
 import unittest
 
-from sync_worker.core import build_json_text, normalize_bot_html, resolve_json_media
+from sync_worker.core import build_json_text, has_media_spoiler, normalize_bot_html, resolve_json_media
 
 
 class JsonCommonTests(unittest.TestCase):
@@ -48,6 +48,7 @@ class JsonCommonTests(unittest.TestCase):
         self.assertIn("#转发自", rendered)
         self.assertIn(">test_channel</a>", rendered)
         self.assertIn('href="https://t.me/c/123/456"', rendered)
+        self.assertIn('#回复自 <a href="https://t.me/c/123/456">外部消息</a>', rendered)
         self.assertTrue(rendered.endswith("\n正文"))
 
     def test_build_json_text_supports_expandable_blockquote(self):
@@ -73,6 +74,10 @@ class JsonCommonTests(unittest.TestCase):
         self.assertEqual(resolve_json_media(msg_video, "X")[1], "video")
         self.assertEqual(resolve_json_media(msg_animation, "X")[1], "animation")
         self.assertEqual(resolve_json_media(msg_sticker, "X")[1], "sticker")
+
+    def test_has_media_spoiler_reads_json_export_flag(self):
+        self.assertTrue(has_media_spoiler({"media_spoiler": True}, "photo", "json"))
+        self.assertFalse(has_media_spoiler({"media_spoiler": False}, "photo", "json"))
 
     def test_normalize_bot_html_rewrites_spoiler_tag(self):
         self.assertEqual(

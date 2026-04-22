@@ -147,6 +147,46 @@ class JsonSyncTests(unittest.IsolatedAsyncioTestCase):
             media = mock_send.await_args.args[1]
             self.assertEqual([item.caption for item in media], ["第一条说明", "第二条说明"])
 
+    async def test_send_json_media_group_keeps_media_spoiler(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            photos_dir = Path(temp_dir) / "photos"
+            photos_dir.mkdir()
+            for name in ["a.jpg", "b.jpg"]:
+                (photos_dir / name).write_bytes(b"jpg")
+
+            group = [
+                {
+                    "id": 1,
+                    "type": "message",
+                    "date_unixtime": "1",
+                    "photo": "photos/a.jpg",
+                    "media_spoiler": True,
+                    "text": "第一条说明",
+                },
+                {
+                    "id": 2,
+                    "type": "message",
+                    "date_unixtime": "2",
+                    "photo": "photos/b.jpg",
+                    "text": "",
+                },
+            ]
+
+            mock_send = AsyncMock(return_value=[FakeSentMessage(1001), FakeSentMessage(1002)])
+            with patch("sync_worker.json_import.process.update_state_and_check_skip", AsyncMock(return_value=False)), \
+                 patch("sync_worker.json_import.process.resolve_reply_target", AsyncMock(return_value=None)), \
+                 patch("sync_worker.json_import.process.rewrite_message_links", AsyncMock(side_effect=lambda text, *_: (text, 0))), \
+                 patch("sync_worker.json_import.process.record_success", AsyncMock()), \
+                 patch("sync_worker.json_import.process.db.add_msg_log", AsyncMock()), \
+                 patch("sync_worker.json_import.process.bot_engine.aiogram_bot") as mock_bot:
+                mock_bot.send_media_group = mock_send
+
+                await json_sync.send_json_media_group(group, -100456, temp_dir, 0, False, {}, "bot", True)
+
+            media = mock_send.await_args.args[1]
+            self.assertTrue(media[0].has_spoiler)
+            self.assertIsNone(media[1].has_spoiler)
+
     async def test_process_json_sync_respects_type_filter(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             json_path = Path(temp_dir) / "result.json"
@@ -212,6 +252,46 @@ class JsonSyncTests(unittest.IsolatedAsyncioTestCase):
                 mock_bot.send_message = AsyncMock(return_value=FakeSentMessage(1002))
 
                 await json_sync.process_json_sync("bot", "@target", str(json_path), 0.5, False)
+
+    async def test_process_json_sync_keeps_single_photo_spoiler(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            photos_dir = Path(temp_dir) / "photos"
+            photos_dir.mkdir()
+            (photos_dir / "pic.jpg").write_bytes(b"jpg")
+            json_path = Path(temp_dir) / "result.json"
+            json_path.write_text(
+                json.dumps(
+                    {
+                        "messages": [
+                            {
+                                "id": 5,
+                                "type": "message",
+                                "photo": "photos/pic.jpg",
+                                "media_spoiler": True,
+                                "text": "caption",
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("sync_worker.json_import.process.resolve_chat_id", AsyncMock(return_value=-100456)), \
+                 patch("sync_worker.json_import.process.build_link_rewrite_context", AsyncMock(return_value={})), \
+                 patch("sync_worker.json_import.process.resolve_reply_target", AsyncMock(return_value=None)), \
+                 patch("sync_worker.json_import.process.db.get_all_settings", AsyncMock(return_value={"sync_photo": "1"})), \
+                 patch("sync_worker.json_import.process.db.add_msg_log", AsyncMock()), \
+                 patch("sync_worker.json_import.process.db.apply_message_filters", AsyncMock(return_value=(False, "caption"))), \
+                 patch("sync_worker.json_import.process.update_state_and_check_skip", AsyncMock(return_value=False)), \
+                 patch("sync_worker.json_import.process.record_success", AsyncMock()), \
+                 patch("sync_worker.json_import.process.bot_engine.note_upload_success", AsyncMock()), \
+                 patch("sync_worker.json_import.process.bot_engine.aiogram_bot") as mock_bot:
+                mock_bot.send_photo = AsyncMock(return_value=FakeSentMessage(1005))
+
+                await json_sync.process_json_sync("bot", "@target", str(json_path), 0.5, False)
+
+            self.assertTrue(mock_bot.send_photo.await_args.kwargs["has_spoiler"])
 
     async def test_process_json_sync_can_send_text_via_user(self):
         with tempfile.TemporaryDirectory() as temp_dir:

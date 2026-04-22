@@ -121,6 +121,23 @@ def _format_linked_label(prefix: str, label: str, href: str) -> str:
     return f'{prefix} <a href="{href}">{escaped_label}</a>'
 
 
+def _chat_display_name(chat) -> str:
+    if chat is None:
+        return ""
+    full_name = getattr(chat, "full_name", None)
+    if full_name:
+        return str(full_name).strip()
+    first_name = getattr(chat, "first_name", None)
+    last_name = getattr(chat, "last_name", None)
+    name = " ".join(part for part in [first_name, last_name] if part)
+    return str(
+        getattr(chat, "title", None)
+        or name
+        or getattr(chat, "username", None)
+        or ""
+    ).strip()
+
+
 def _build_external_source_header(msg) -> str:
     parts: list[str] = []
     forward_msg_id = _extract_forward_message_id(msg)
@@ -232,10 +249,12 @@ def _build_external_source_header(msg) -> str:
 
     reply_to_peer_id = str(_message_value(msg, "reply_to_peer_id", "") or "").strip()
     reply_to_message_id = str(_message_value(msg, "reply_to_message_id", "") or "").strip()
+    reply_label = "外部消息"
     if (not reply_to_peer_id or not reply_to_message_id) and not isinstance(msg, dict):
         external_reply = _message_value(msg, "external_reply")
         if external_reply is not None:
             external_chat = getattr(external_reply, "chat", None)
+            reply_label = _chat_display_name(external_chat) or reply_label
             reply_to_peer_id = str(
                 getattr(external_chat, "id", None)
                 or getattr(external_reply, "chat_id", "")
@@ -249,9 +268,9 @@ def _build_external_source_header(msg) -> str:
     if reply_to_peer_id and reply_to_message_id:
         href = _build_external_reply_href(reply_to_peer_id, reply_to_message_id)
         if href:
-            parts.append(f'<a href="{href}">#回复自外部消息</a>')
+            parts.append(_format_linked_label("#回复自", reply_label, href))
         else:
-            parts.append("#回复自外部消息")
+            parts.append(f"#回复自 {html.escape(reply_label)}")
 
     return "\n".join(parts)
 

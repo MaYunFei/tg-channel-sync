@@ -53,9 +53,7 @@ def get_reply_source_msg_id(msg, mode):
 def has_media_spoiler(msg, msg_type, mode):
     """检查消息是否有媒体遮罩（spoiler）"""
     if mode == "json":
-        # JSON 导出格式中检查 media_type 是否包含 spoiler 标记
-        # 或者检查特定字段
-        return False  # JSON 导出通常不包含 spoiler 信息
+        return bool(msg.get("media_spoiler") or msg.get("has_spoiler") or msg.get("has_media_spoiler"))
     
     # aiogram/pyrofork 消息对象
     if msg_type in ["photo", "video", "animation"]:
