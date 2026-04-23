@@ -1,6 +1,13 @@
 import unittest
 
-from sync_worker.core import build_json_text, has_media_spoiler, normalize_bot_html, resolve_json_media
+from sync_worker.core import (
+    build_json_text,
+    has_media_spoiler,
+    has_text_spoiler,
+    normalize_bot_html,
+    normalize_pyro_html,
+    resolve_json_media,
+)
 
 
 class JsonCommonTests(unittest.TestCase):
@@ -79,8 +86,45 @@ class JsonCommonTests(unittest.TestCase):
         self.assertTrue(has_media_spoiler({"media_spoiler": True}, "photo", "json"))
         self.assertFalse(has_media_spoiler({"media_spoiler": False}, "photo", "json"))
 
+    def test_has_media_spoiler_reads_pyrogram_message_flag(self):
+        class Media:
+            file_id = "file-id"
+
+        class Message:
+            photo = Media()
+            has_media_spoiler = True
+
+        self.assertTrue(has_media_spoiler(Message(), "photo", "api"))
+
+    def test_has_media_spoiler_reads_pyrogram_raw_media_flag(self):
+        class RawMedia:
+            spoiler = True
+
+        class RawMessage:
+            media = RawMedia()
+
+        class Media:
+            file_id = "file-id"
+
+        class Message:
+            photo = Media()
+            raw = RawMessage()
+
+        self.assertTrue(has_media_spoiler(Message(), "photo", "api"))
+
+    def test_has_text_spoiler_reads_html_and_entities(self):
+        self.assertTrue(has_text_spoiler(html_text="a<tg-spoiler>x</tg-spoiler>"))
+        self.assertTrue(has_text_spoiler({"entities": [{"type": "spoiler"}]}, "plain"))
+        self.assertFalse(has_text_spoiler({"entities": [{"type": "bold"}]}, "plain"))
+
     def test_normalize_bot_html_rewrites_spoiler_tag(self):
         self.assertEqual(
             normalize_bot_html("a<spoiler>x</spoiler>b"),
             "a<tg-spoiler>x</tg-spoiler>b",
+        )
+
+    def test_normalize_pyro_html_rewrites_tg_spoiler_tag(self):
+        self.assertEqual(
+            normalize_pyro_html("a<tg-spoiler>x</tg-spoiler>b"),
+            "a<spoiler>x</spoiler>b",
         )

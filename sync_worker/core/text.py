@@ -7,6 +7,10 @@ import re
 BOT_HTML_TAG_ALIASES = (
     (re.compile(r"<(/?)spoiler>"), r"<\1tg-spoiler>"),
 )
+PYRO_HTML_TAG_ALIASES = (
+    (re.compile(r"<(/?)tg-spoiler>"), r"<\1spoiler>"),
+)
+TEXT_SPOILER_RE = re.compile(r"<(/?)(?:tg-)?spoiler\b", re.IGNORECASE)
 
 
 def _message_value(msg, key, default=None):
@@ -290,6 +294,26 @@ def normalize_bot_html(text: str | None) -> str:
     for pattern, replacement in BOT_HTML_TAG_ALIASES:
         normalized = pattern.sub(replacement, normalized)
     return normalized
+
+
+def normalize_pyro_html(text: str | None) -> str:
+    normalized = str(text or "")
+    for pattern, replacement in PYRO_HTML_TAG_ALIASES:
+        normalized = pattern.sub(replacement, normalized)
+    return normalized
+
+
+def has_text_spoiler(msg=None, html_text: str | None = None) -> bool:
+    if html_text and TEXT_SPOILER_RE.search(str(html_text)):
+        return True
+
+    for field_name in ("entities", "caption_entities"):
+        entities = _message_value(msg, field_name, []) or []
+        for entity in entities:
+            entity_type = _message_value(entity, "type", "")
+            if str(entity_type).lower().endswith("spoiler"):
+                return True
+    return False
 
 
 def build_json_text(msg, *, include_external_source_header: bool = False):

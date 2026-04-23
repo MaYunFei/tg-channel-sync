@@ -54,15 +54,20 @@ def has_media_spoiler(msg, msg_type, mode):
     """检查消息是否有媒体遮罩（spoiler）"""
     if mode == "json":
         return bool(msg.get("media_spoiler") or msg.get("has_spoiler") or msg.get("has_media_spoiler"))
-    
-    # aiogram/pyrofork 消息对象
-    if msg_type in ["photo", "video", "animation"]:
-        media_obj = getattr(msg, msg_type, None)
-        if media_obj:
-            # aiogram 3.x 使用 has_media_spoiler
-            return getattr(media_obj, "has_media_spoiler", False) or getattr(msg, "has_media_spoiler", False)
-    
-    return False
+
+    if msg_type not in {"photo", "video", "animation"}:
+        return False
+
+    media_obj = getattr(msg, msg_type, None)
+    raw_media = getattr(getattr(msg, "raw", None), "media", None)
+    candidates = (msg, media_obj, getattr(msg, "media", None), raw_media)
+    spoiler_fields = ("has_media_spoiler", "has_spoiler", "spoiler")
+    return any(
+        bool(getattr(candidate, field, False))
+        for candidate in candidates
+        if candidate
+        for field in spoiler_fields
+    )
 
 
 def resolve_json_media(msg, json_dir):

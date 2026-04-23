@@ -11,6 +11,7 @@ from pyrogram.enums import ParseMode
 from pyrogram.types import InputMediaAudio, InputMediaDocument, InputMediaPhoto, InputMediaVideo
 
 from ..core.progress import ProgressFSInputFile, UploadProgressTracker, format_upload_label
+from ..core.text import normalize_bot_html, normalize_pyro_html
 
 
 AIO_MEDIA_CLS = {"photo": AioPhoto, "video": AioVideo, "audio": AioAudio, "document": AioDocument}
@@ -40,9 +41,8 @@ def build_bot_media_group(downloaded_files, rewritten_captions, thumbnail_paths,
         thumbnail_path = thumbnail_paths.get(getattr(item, "id", None) or item.get("id"))
         thumbnail_input = FSInputFile(thumbnail_path) if thumbnail_path and os.path.exists(thumbnail_path) else None
         
-        media_kwargs = {"media": media_input, "caption": caption_html, "parse_mode": "HTML"}
+        media_kwargs = {"media": media_input, "caption": normalize_bot_html(caption_html), "parse_mode": "HTML"}
         
-        # 添加媒体遮罩支持
         if index - 1 < len(spoiler_flags) and spoiler_flags[index - 1]:
             if item_type in {"photo", "video"}:
                 media_kwargs["has_spoiler"] = True
@@ -74,9 +74,12 @@ def build_user_media_group(downloaded_files, rewritten_captions, thumbnail_paths
         media_cls = PYRO_MEDIA_CLS.get(item_type, PYRO_MEDIA_CLS["document"])
         thumbnail_path = thumbnail_paths.get(getattr(item, "id", None) or item.get("id"))
         
-        media_kwargs = {"media": path, "caption": rewritten_captions[index], "parse_mode": ParseMode.HTML}
+        media_kwargs = {
+            "media": path,
+            "caption": normalize_pyro_html(rewritten_captions[index]),
+            "parse_mode": ParseMode.HTML,
+        }
         
-        # 添加媒体遮罩支持
         if index < len(spoiler_flags) and spoiler_flags[index]:
             if item_type in {"photo", "video"}:
                 media_kwargs["has_spoiler"] = True

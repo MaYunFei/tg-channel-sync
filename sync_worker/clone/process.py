@@ -3,9 +3,6 @@ from __future__ import annotations
 import asyncio
 import os
 from aiogram.types import FSInputFile
-from aiogram.types import InputMediaAudio as AioAudio
-from aiogram.types import InputMediaDocument as AioDoc
-from aiogram.types import InputMediaPhoto as AioPhoto
 from aiogram.types import InputMediaVideo as AioVideo
 from aiogram.types import ReplyParameters
 from pyrogram.enums import ParseMode
@@ -31,7 +28,10 @@ from ..core import (
     get_media_reference,
     get_msg_meta,
     get_reply_source_msg_id,
+    has_media_spoiler,
+    has_text_spoiler,
     normalize_bot_html,
+    normalize_pyro_html,
     prepend_source_header_html,
     rewrite_media_group_captions,
 )
@@ -46,8 +46,6 @@ from ..runtime import (
     update_state_and_check_skip,
 )
 from ..senders import (
-    AIO_MEDIA_CLS,
-    PYRO_MEDIA_CLS,
     build_bot_media_group,
     build_user_media_group,
     dynamic_send,
@@ -66,7 +64,57 @@ from .helpers import (
 from ..json_import import process_json_sync
 
 
-AIO_MEDIA_CLS = {"photo": AioPhoto, "video": AioVideo, "audio": AioAudio, "document": AioDoc}
+def _normalize_sync_html(mode: str, html_text: str | None) -> str:
+    return normalize_pyro_html(html_text) if mode == "api" else normalize_bot_html(html_text)
+
+
+def _base_api_copy_kwargs(target_id, source_id, msg_id):
+    return {"chat_id": target_id, "from_chat_id": source_id, "message_id": msg_id}
+
+
+def _add_reply_kwargs(kwargs: dict, reply_to_id):
+    if reply_to_id:
+        kwargs["reply_to_message_id"] = reply_to_id
+    return kwargs
+
+
+def _add_quote_kwargs(kwargs: dict, quote_data, reply_to_id):
+    if quote_data and reply_to_id:
+        kwargs["quote_text"] = quote_data["text"]
+        if quote_data.get("entities"):
+            kwargs["quote_entities"] = quote_data["entities"]
+    return kwargs
+
+
+async def _send_api_media(
+    app,
+    msg_type,
+    target_id,
+    media_ref,
+    caption_html,
+    reply_to_id=None,
+    quote_data=None,
+    has_spoiler=False,
+):
+    return await safe_execute(
+        dynamic_send(
+            app,
+            msg_type,
+            target_id,
+            media_ref,
+            caption_html,
+            ParseMode.HTML,
+            reply_to_message_id=reply_to_id,
+            quote_data=quote_data,
+            has_spoiler=has_spoiler,
+        ),
+        sync_state,
+    )
+
+
+def _api_group_captions(rewritten_captions):
+    return [normalize_pyro_html(caption_html or "") for caption_html in rewritten_captions]
+
 
 async def sync_single_message(mode, sender, app, bot, source_id, target_id, msg, safe_delay, force_send, hash_perturb=False, clone_fallback_to_user=True, include_external_source_header: bool = False):
     msg_type, _ = get_msg_meta(msg, mode)
@@ -85,7 +133,9 @@ async def sync_single_message(mode, sender, app, bot, source_id, target_id, msg,
     reply_to_id = await resolve_reply_target(source_id, target_id, get_reply_source_msg_id(msg, mode), mode.upper(), msg.id)
     link_context = await build_link_rewrite_context(bot_engine.aiogram_bot, source_id, target_id)
     new_html, rewrite_count = await rewrite_message_links(new_html, source_id, link_context)
-    new_html = normalize_bot_html(new_html)
+    new_html = _normalize_sync_html(mode, new_html)
+    media_has_spoiler = has_media_spoiler(msg, msg_type, mode)
+    text_has_spoiler = has_text_spoiler(msg, new_html)
     if rewrite_count:
         await db.add_msg_log(f"{mode.upper()}_LINK_REWRITE", f"原始:[{source_id}] 消息ID:{msg.id} | 命中 {rewrite_count} 个链接改写")
 
@@ -107,13 +157,19 @@ async def sync_single_message(mode, sender, app, bot, source_id, target_id, msg,
                     media_ref = get_media_reference(msg, msg_type)
                     if not media_ref:
                         raise ValueError(f"引用回复媒体缺少可复用 file_id: {msg.id}")
-                    sent = await safe_execute(
-                        dynamic_send(app, msg_type, target_id, media_ref, new_html, ParseMode.HTML, reply_to_message_id=reply_to_id, quote_data=quote_data),
-                        sync_state,
+                    sent = await _send_api_media(
+                        app,
+                        msg_type,
+                        target_id,
+                        media_ref,
+                        new_html,
+                        reply_to_id,
+                        quote_data,
+                        has_spoiler=media_has_spoiler,
                     )
                     sent_id = sent.id
                 await db.add_msg_log("API_QUOTE_SEND", f"原始:[{source_id}] 消息ID:{msg.id} | 已按引用回复发送")
-            elif new_html != text_html or include_external_source_header:
+            elif new_html != text_html or include_external_source_header or text_has_spoiler or media_has_spoiler:
                 # 如果文本发生变化，或者启用了外部来源前缀功能，使用 send_message/copy_message with caption
                 # 这样可以确保转发信息被正确处理（避免 copy_message 的不一致行为）
                 if not has_media:
@@ -121,15 +177,19 @@ async def sync_single_message(mode, sender, app, bot, source_id, target_id, msg,
                     if reply_to_id:
                         kwargs["reply_to_message_id"] = reply_to_id
                     sent_id = (await safe_execute(app.send_message(**kwargs), sync_state)).id
+                elif media_has_spoiler:
+                    media_ref = get_media_reference(msg, msg_type)
+                    if not media_ref:
+                        raise ValueError(f"媒体遮罩消息缺少可复用 file_id: {msg.id}")
+                    sent = await _send_api_media(app, msg_type, target_id, media_ref, new_html, reply_to_id, has_spoiler=True)
+                    sent_id = sent.id
                 else:
-                    kwargs = {"chat_id": target_id, "from_chat_id": source_id, "message_id": msg.id, "caption": new_html}
-                    if reply_to_id:
-                        kwargs["reply_to_message_id"] = reply_to_id
+                    kwargs = _add_reply_kwargs(_base_api_copy_kwargs(target_id, source_id, msg.id), reply_to_id)
+                    kwargs.update({"caption": new_html, "parse_mode": ParseMode.HTML})
                     sent_id = (await safe_execute(app.copy_message(**kwargs), sync_state)).id
             else:
-                kwargs = {"chat_id": target_id, "from_chat_id": source_id, "message_id": msg.id}
-                if reply_to_id:
-                    kwargs["reply_to_message_id"] = reply_to_id
+                kwargs = _base_api_copy_kwargs(target_id, source_id, msg.id)
+                _add_reply_kwargs(kwargs, reply_to_id)
                 sent_id = (await safe_execute(app.copy_message(**kwargs), sync_state)).id
         else:
             if not has_media:
@@ -322,48 +382,31 @@ async def sync_media_group(mode, sender, app, bot, source_id, target_id, group, 
         group,
         include_external_source_header=include_external_source_header,
     )
-    
-    # 收集媒体遮罩标志
-    from ..core import has_media_spoiler
     spoiler_flags = []
     for item in group:
         item_type, _ = get_msg_meta(item, mode)
         spoiler_flags.append(has_media_spoiler(item, item_type, mode))
+    group_has_spoiler = any(spoiler_flags)
 
     if mode == "api":
         for _ in range(3):
             if sync_state["stop_requested"]:
                 break
             try:
-                if captions_changed or any(spoiler_flags):
-                    media_list = []
-                    for item, caption_html, has_spoiler in zip(group, rewritten_captions, spoiler_flags):
-                        item_type, _ = get_msg_meta(item, mode)
-                        media_ref = get_media_reference(item, item_type)
-                        if not media_ref:
-                            raise ValueError(f"媒体组消息缺少可复用 file_id: {item.id}")
-                        media_cls = PYRO_MEDIA_CLS.get(item_type, PYRO_MEDIA_CLS["document"])
-                        media_kwargs = {"media": media_ref, "caption": caption_html, "parse_mode": ParseMode.HTML}
-                        # 添加遮罩支持
-                        if has_spoiler and item_type in {"photo", "video"}:
-                            media_kwargs["has_spoiler"] = True
-                        media_list.append(media_cls(**media_kwargs))
-                    kwargs = {"chat_id": target_id, "media": media_list}
-                    if reply_to_id:
-                        kwargs["reply_to_message_id"] = reply_to_id
-                    if quote_data and reply_to_id:
-                        kwargs["quote_text"] = quote_data["text"]
-                        if quote_data.get("entities"):
-                            kwargs["quote_entities"] = quote_data["entities"]
-                    copied_msgs = await safe_execute(app.send_media_group(**kwargs), sync_state)
+                if captions_changed or group_has_spoiler:
+                    kwargs = _base_api_copy_kwargs(target_id, source_id, group[0].id)
+                    kwargs["parse_mode"] = ParseMode.HTML
+                    if captions_changed:
+                        kwargs["captions"] = _api_group_captions(rewritten_captions)
+                    if group_has_spoiler:
+                        kwargs["has_spoilers"] = spoiler_flags
+                    _add_reply_kwargs(kwargs, reply_to_id)
+                    _add_quote_kwargs(kwargs, quote_data, reply_to_id)
+                    copied_msgs = await safe_execute(app.copy_media_group(**kwargs), sync_state)
                 else:
-                    kwargs = {"chat_id": target_id, "from_chat_id": source_id, "message_id": group[0].id}
-                    if reply_to_id:
-                        kwargs["reply_to_message_id"] = reply_to_id
-                    if quote_data and reply_to_id:
-                        kwargs["quote_text"] = quote_data["text"]
-                        if quote_data.get("entities"):
-                            kwargs["quote_entities"] = quote_data["entities"]
+                    kwargs = _base_api_copy_kwargs(target_id, source_id, group[0].id)
+                    _add_reply_kwargs(kwargs, reply_to_id)
+                    _add_quote_kwargs(kwargs, quote_data, reply_to_id)
                     copied_msgs = await safe_execute(app.copy_media_group(**kwargs), sync_state)
                 for orig_m, new_m in zip(group, copied_msgs):
                     await record_success(source_id, target_id, orig_m.id, new_m.id, force_send=force_send)

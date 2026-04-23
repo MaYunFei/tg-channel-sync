@@ -6,7 +6,7 @@ from pyrogram.types import InputMediaAudio, InputMediaDocument, InputMediaPhoto,
 import bot_engine
 from services.sync_services import build_link_rewrite_context, rewrite_message_links
 
-from .text import normalize_bot_html, prepend_source_header_html
+from .text import prepend_source_header_html
 
 
 PYRO_MEDIA_CLS = {
@@ -56,7 +56,6 @@ async def rewrite_media_group_captions(source_id, target_id, group, source_usern
         
         # 链接改写
         rewritten_caption, rewrite_count = await rewrite_message_links(caption_with_header, source_id, link_context)
-        rewritten_caption = normalize_bot_html(rewritten_caption)
         
         # 如果链接改写后有变化，也标记为已改变
         if rewritten_caption != caption_with_header:

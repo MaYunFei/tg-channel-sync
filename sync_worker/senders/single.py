@@ -4,7 +4,7 @@ from aiogram.types import ReplyParameters
 
 import bot_engine
 
-from ..core.text import normalize_bot_html
+from ..core.text import normalize_bot_html, normalize_pyro_html
 
 
 async def dynamic_send(
@@ -19,6 +19,7 @@ async def dynamic_send(
     progress=None,
     progress_args=None,
     thumbnail=None,
+    has_spoiler=False,
 ):
     method_name = "send_message" if msg_type == "text" else f"send_{msg_type}"
     method = getattr(client, method_name, None) or getattr(client, "send_document")
@@ -42,8 +43,10 @@ async def dynamic_send(
     if msg_type == "sticker":
         kwargs["sticker"] = file_ref
     elif msg_type != "text":
-        kwargs["caption"] = normalize_bot_html(caption) if bot_engine.is_bot_client(client) else caption
+        kwargs["caption"] = normalize_bot_html(caption) if bot_engine.is_bot_client(client) else normalize_pyro_html(caption)
         kwargs[msg_type if hasattr(client, method_name) else "document"] = file_ref
+        if has_spoiler and msg_type in {"photo", "video", "animation"}:
+            kwargs["has_spoiler"] = True
         if thumbnail is not None:
             if bot_engine.is_bot_client(client):
                 kwargs["thumbnail"] = thumbnail
@@ -52,7 +55,7 @@ async def dynamic_send(
             else:
                 kwargs["thumb"] = thumbnail
     else:
-        kwargs["text"] = normalize_bot_html(caption) if bot_engine.is_bot_client(client) else caption
+        kwargs["text"] = normalize_bot_html(caption) if bot_engine.is_bot_client(client) else normalize_pyro_html(caption)
     if not bot_engine.is_bot_client(client) and progress is not None:
         kwargs["progress"] = progress
         if progress_args:
