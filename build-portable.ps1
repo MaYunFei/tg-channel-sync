@@ -163,6 +163,7 @@ $AppFiles = @(
     "bot_engine.py",
     "database.py",
     "main.py",
+    "server_runtime.py",
     "services",
     "sync_worker",
     "static"

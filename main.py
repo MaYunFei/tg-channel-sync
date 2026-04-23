@@ -1,23 +1,24 @@
 ﻿import asyncio
+import importlib
 import json
 import shutil
 import signal
 import sys
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 
 import uvicorn
 from fastapi import BackgroundTasks, FastAPI, Form, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-import bot_engine
 import database as db
 from app_config import get_config, get_setup_status, save_config
 from app_paths import ensure_runtime_dirs, static_dir, temp_dir
 from server_runtime import launch_browser_when_ready, reuse_existing_instance_or_exit, should_auto_open_browser
 from services.sync_services import normalize_channel_username, resolve_chat_id
 from services.version_service import GITHUB_REPO, get_local_version, get_remote_version_info, is_version_at_least
-from sync_worker import process_master_sync, sync_state
+from sync_worker.runtime import sync_state
 
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
@@ -34,7 +35,12 @@ app_info_cache = {
     "bot": {"name": "", "username": "", "status": STATUS_NOT_CONFIGURED},
     "user": {"name": "", "status": STATUS_NOT_CONFIGURED},
 }
+bot_engine = SimpleNamespace(aiogram_bot=None, pyro_user_app=None)
+bot_engine_module = None
+bot_engine_load_task = None
+process_master_sync = None
 polling_task = None
+startup_task = None
 TEMP_DIR = str(temp_dir())
 _cleanup_done = False
 SHUTDOWN_EVENT = asyncio.Event()
@@ -50,16 +56,77 @@ def refresh_app_info(bot_info=None, user_info=None):
         app_info_cache["user"].update(user_info)
 
 
+def _bot_is_initializing() -> bool:
+    return app_info_cache.get("bot", {}).get("status") == STATUS_INITIALIZING
+
+
+async def _ensure_bot_engine_loaded():
+    global bot_engine, bot_engine_module, bot_engine_load_task
+    if bot_engine_module is not None:
+        return bot_engine_module
+    if bot_engine_load_task is None:
+        bot_engine_load_task = asyncio.create_task(asyncio.to_thread(importlib.import_module, "bot_engine"))
+    bot_engine_module = await bot_engine_load_task
+    bot_engine = bot_engine_module
+    return bot_engine_module
+
+
+def _get_loaded_bot_engine():
+    return bot_engine_module
+
+
+def _get_loaded_or_patched_bot_engine():
+    if bot_engine_module is not None:
+        return bot_engine_module
+    if getattr(bot_engine, "aiogram_bot", None) is not None or getattr(bot_engine, "pyro_user_app", None) is not None:
+        return bot_engine
+    return None
+
+
+async def _ensure_process_master_sync_loaded():
+    global process_master_sync
+    if process_master_sync is None:
+        module = await asyncio.to_thread(importlib.import_module, "sync_worker.clone.process")
+        process_master_sync = module.process_master_sync
+    return process_master_sync
+
+
+def _user_auth_status_before_engine_loaded():
+    status = app_info_cache.get("user", {}).get("status") or STATUS_NOT_CONFIGURED
+    return {
+        "status": status,
+        "awaiting_code": False,
+        "awaiting_password": False,
+        "phone_number": "",
+        "password_hint": "",
+        "send_code_cooldown": 0,
+        "user": None,
+    }
+
+
 async def _force_cleanup():
-    global polling_task
+    global polling_task, startup_task
     SHUTDOWN_EVENT.set()
     sync_state["stop_requested"] = True
 
-    if polling_task:
+    if startup_task:
+        try:
+            if not startup_task.done():
+                startup_task.cancel()
+            await asyncio.wait_for(startup_task, timeout=5)
+        except (asyncio.CancelledError, asyncio.TimeoutError, RuntimeError):
+            pass
+        except Exception:
+            pass
+        startup_task = None
+
+    loaded_bot_engine = _get_loaded_bot_engine()
+
+    if polling_task and loaded_bot_engine is not None:
         try:
             if not polling_task.done():
                 try:
-                    await bot_engine.dp.stop_polling()
+                    await loaded_bot_engine.dp.stop_polling()
                 except RuntimeError:
                     pass
             await asyncio.wait_for(polling_task, timeout=5)
@@ -73,8 +140,9 @@ async def _force_cleanup():
             pass
         polling_task = None
 
-    await bot_engine.close_user_client()
-    await bot_engine.close_bot_client()
+    if loaded_bot_engine is not None:
+        await loaded_bot_engine.close_user_client()
+        await loaded_bot_engine.close_bot_client()
     await db.close_db()
 
 
@@ -88,25 +156,9 @@ def _request_server_exit():
             SERVER.should_exit = True
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global polling_task, _cleanup_done
-
-    def _sigint_handler(signum, frame):
-        print("\n[INFO] 收到关闭信号，正在退出...")
-        _request_server_exit()
-
-    signal.signal(signal.SIGINT, _sigint_handler)
-
-    ensure_runtime_dirs()
-    await db.init_db()
-    if temp_dir().exists():
-        shutil.rmtree(temp_dir(), ignore_errors=True)
-    temp_dir().mkdir(parents=True, exist_ok=True)
-
+def _reset_startup_app_info() -> None:
     config = get_config()
     telegram = config["telegram"]
-
     refresh_app_info(
         {
             "name": "",
@@ -121,35 +173,69 @@ async def lifespan(app: FastAPI):
         },
     )
 
+
+async def _initialize_clients_in_background() -> None:
+    global polling_task
+    if SHUTDOWN_EVENT.is_set():
+        return
+    loaded_bot_engine = await _ensure_bot_engine_loaded()
+
     try:
-        bot = bot_engine.init_bot_client()
-        if bot:
+        bot = loaded_bot_engine.init_bot_client()
+        if bot and not SHUTDOWN_EVENT.is_set():
             me = await bot.get_me()
             refresh_app_info({"name": me.first_name, "username": me.username, "status": STATUS_CONNECTED})
             polling_task = asyncio.create_task(
-                bot_engine.dp.start_polling(
+                loaded_bot_engine.dp.start_polling(
                     bot,
                     handle_signals=False,
                     close_bot_session=False,
                 )
             )
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:
         refresh_app_info({"status": STATUS_START_FAILED})
         await db.add_sys_log("ERROR", f"Bot 启动失败: {exc}")
 
-    if bot_engine.has_user_api_credentials():
+    if SHUTDOWN_EVENT.is_set():
+        return
+
+    if loaded_bot_engine.has_user_api_credentials():
         try:
-            user_me = await asyncio.wait_for(bot_engine.start_user_client_if_authorized(), timeout=30)
+            user_me = await asyncio.wait_for(loaded_bot_engine.start_user_client_if_authorized(), timeout=30)
             if user_me:
                 refresh_app_info(user_info={"name": user_me.first_name, "status": STATUS_LOGGED_IN})
             else:
                 refresh_app_info(user_info={"name": "", "status": STATUS_LOGIN_REQUIRED})
+        except asyncio.CancelledError:
+            raise
         except asyncio.TimeoutError:
             refresh_app_info(user_info={"status": STATUS_TIMEOUT})
             await db.add_sys_log("WARNING", "辅助账号连接超时，API 模式暂不可用")
         except Exception as exc:
             refresh_app_info(user_info={"status": STATUS_START_FAILED})
             await db.add_sys_log("WARNING", f"辅助账号启动失败: {exc}")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global startup_task, _cleanup_done
+
+    def _sigint_handler(signum, frame):
+        print("\n[INFO] 收到关闭信号，正在退出...")
+        _request_server_exit()
+
+    signal.signal(signal.SIGINT, _sigint_handler)
+
+    ensure_runtime_dirs()
+    await db.init_db()
+    if temp_dir().exists():
+        shutil.rmtree(temp_dir(), ignore_errors=True)
+    temp_dir().mkdir(parents=True, exist_ok=True)
+
+    _reset_startup_app_info()
+    startup_task = asyncio.create_task(_initialize_clients_in_background())
 
     yield
 
@@ -229,14 +315,18 @@ async def get_version_info():
 
 @app.get("/api/user_auth/status")
 async def get_user_auth_status():
-    return bot_engine.get_user_auth_status()
+    loaded_bot_engine = _get_loaded_bot_engine()
+    if loaded_bot_engine is None:
+        return _user_auth_status_before_engine_loaded()
+    return loaded_bot_engine.get_user_auth_status()
 
 
 @app.post("/api/user_auth/send_code")
 async def send_user_auth_code(request: Request):
     try:
+        loaded_bot_engine = await _ensure_bot_engine_loaded()
         payload = await request.json()
-        result = await bot_engine.begin_user_auth(payload.get("phone_number", ""))
+        result = await loaded_bot_engine.begin_user_auth(payload.get("phone_number", ""))
         if result["status"] == "authorized":
             user = result["user"]
             refresh_app_info(user_info={"name": user["name"], "status": STATUS_LOGGED_IN})
@@ -250,8 +340,9 @@ async def send_user_auth_code(request: Request):
 @app.post("/api/user_auth/sign_in")
 async def sign_in_user_auth(request: Request):
     try:
+        loaded_bot_engine = await _ensure_bot_engine_loaded()
         payload = await request.json()
-        result = await bot_engine.complete_user_auth(payload.get("phone_code", ""))
+        result = await loaded_bot_engine.complete_user_auth(payload.get("phone_code", ""))
         if result["status"] == "authorized":
             user = result["user"]
             refresh_app_info(user_info={"name": user["name"], "status": STATUS_LOGGED_IN})
@@ -265,8 +356,9 @@ async def sign_in_user_auth(request: Request):
 @app.post("/api/user_auth/check_password")
 async def check_user_auth_password(request: Request):
     try:
+        loaded_bot_engine = await _ensure_bot_engine_loaded()
         payload = await request.json()
-        result = await bot_engine.complete_user_password(payload.get("password", ""))
+        result = await loaded_bot_engine.complete_user_password(payload.get("password", ""))
         user = result["user"]
         refresh_app_info(user_info={"name": user["name"], "status": STATUS_LOGGED_IN})
         return result
@@ -277,11 +369,12 @@ async def check_user_auth_password(request: Request):
 @app.post("/api/user_auth/cancel")
 async def cancel_user_auth():
     try:
-        result = await bot_engine.cancel_user_auth()
+        loaded_bot_engine = await _ensure_bot_engine_loaded()
+        result = await loaded_bot_engine.cancel_user_auth()
         refresh_app_info(
             user_info={
                 "name": "",
-                "status": STATUS_LOGIN_REQUIRED if bot_engine.has_user_api_credentials() else STATUS_NOT_CONFIGURED,
+                "status": STATUS_LOGIN_REQUIRED if loaded_bot_engine.has_user_api_credentials() else STATUS_NOT_CONFIGURED,
             }
         )
         return result
@@ -292,11 +385,12 @@ async def cancel_user_auth():
 @app.post("/api/user_auth/switch_account")
 async def switch_user_account():
     try:
-        result = await bot_engine.switch_user_account()
+        loaded_bot_engine = await _ensure_bot_engine_loaded()
+        result = await loaded_bot_engine.switch_user_account()
         refresh_app_info(
             user_info={
                 "name": "",
-                "status": STATUS_LOGIN_REQUIRED if bot_engine.has_user_api_credentials() else STATUS_NOT_CONFIGURED,
+                "status": STATUS_LOGIN_REQUIRED if loaded_bot_engine.has_user_api_credentials() else STATUS_NOT_CONFIGURED,
             }
         )
         return result
@@ -433,8 +527,15 @@ async def add_mapping(
     realtime_hash_perturb: str = Form("0"),
 ):
     try:
-        src = await resolve_chat_id(bot_engine.aiogram_bot, source_id)
-        tgt = await resolve_chat_id(bot_engine.aiogram_bot, target_id)
+        loaded_bot_engine = _get_loaded_or_patched_bot_engine()
+        if loaded_bot_engine is None:
+            if _bot_is_initializing():
+                return {"status": "error", "message": "Bot 初始化中，请稍后重试"}
+            loaded_bot_engine = await _ensure_bot_engine_loaded()
+        if loaded_bot_engine.aiogram_bot is None and _bot_is_initializing():
+            return {"status": "error", "message": "Bot 初始化中，请稍后重试"}
+        src = await resolve_chat_id(loaded_bot_engine.aiogram_bot, source_id)
+        tgt = await resolve_chat_id(loaded_bot_engine.aiogram_bot, target_id)
         if src == tgt:
             message = "源频道和目标频道不能相同"
             await db.add_sys_log("WARNING", f"添加频道映射失败: {message} ({src} -> {tgt})")
@@ -558,11 +659,18 @@ async def start_sync(
 ):
     if sync_state["is_syncing"]:
         return {"status": "error", "message": "任务正在运行中"}
-    if bot_engine.aiogram_bot is None:
+    loaded_bot_engine = _get_loaded_or_patched_bot_engine()
+    if loaded_bot_engine is None:
+        if _bot_is_initializing():
+            return {"status": "error", "message": "Bot 初始化中，请稍后重试"}
+        loaded_bot_engine = await _ensure_bot_engine_loaded()
+    if loaded_bot_engine.aiogram_bot is None:
+        if _bot_is_initializing():
+            return {"status": "error", "message": "Bot 初始化中，请稍后重试"}
         return {"status": "error", "message": "请先在设置中配置并重启 BOT"}
-    if mode in ["api", "clone"] and not bot_engine.pyro_user_app:
+    if mode in ["api", "clone"] and not loaded_bot_engine.pyro_user_app:
         return {"status": "error", "message": "请先完成辅助账号登录"}
-    if mode == "json" and sender == "user" and not bot_engine.pyro_user_app:
+    if mode == "json" and sender == "user" and not loaded_bot_engine.pyro_user_app:
         return {"status": "error", "message": "JSON 导入使用辅助账号发送前，请先完成辅助账号登录"}
 
     json_media_group_window_seconds = getattr(
@@ -571,8 +679,9 @@ async def start_sync(
         json_media_group_window_seconds,
     )
 
+    sync_func = await _ensure_process_master_sync_loaded()
     background_tasks.add_task(
-        process_master_sync,
+        sync_func,
         mode,
         sender,
         source_id,

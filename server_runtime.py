@@ -5,7 +5,6 @@ import threading
 import time
 import urllib.request
 from asyncio import Event
-from urllib.error import URLError
 
 import webbrowser
 
@@ -73,7 +72,6 @@ def reuse_existing_instance_or_exit(host: str, port: int, auto_open_browser: boo
 
 def launch_browser_when_ready(host: str, port: int, shutdown_event: Event) -> None:
     url = browser_url(host, port)
-    health_url = f"{url}/health"
 
     with _BROWSER_OPEN_LOCK:
         if url in _BROWSER_OPENED_URLS:
@@ -82,19 +80,13 @@ def launch_browser_when_ready(host: str, port: int, shutdown_event: Event) -> No
 
     def _worker():
         try:
-            for _ in range(60):
+            for _ in range(120):
                 if shutdown_event.is_set():
                     return
-                try:
-                    with urllib.request.urlopen(health_url, timeout=1) as response:
-                        if response.status == 200:
-                            webbrowser.open(url)
-                            return
-                except (URLError, TimeoutError, OSError, ValueError):
-                    pass
-                except Exception:
+                if _is_port_open(host, port):
+                    webbrowser.open(url)
                     return
-                threading.Event().wait(0.5)
+                threading.Event().wait(0.1)
         finally:
             with _BROWSER_OPEN_LOCK:
                 _BROWSER_OPENED_URLS.discard(url)
