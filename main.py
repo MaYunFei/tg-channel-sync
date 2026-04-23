@@ -436,11 +436,17 @@ async def add_mapping(
         src = await resolve_chat_id(bot_engine.aiogram_bot, source_id)
         tgt = await resolve_chat_id(bot_engine.aiogram_bot, target_id)
         if src == tgt:
-            return {"status": "error", "message": "源频道和目标频道不能相同"}
+            message = "源频道和目标频道不能相同"
+            await db.add_sys_log("WARNING", f"添加频道映射失败: {message} ({src} -> {tgt})")
+            return {"status": "error", "message": message}
         if await db.has_channel_mapping(src, tgt):
-            return {"status": "error", "message": "该频道映射已存在，请先删除后重新添加"}
+            message = "该频道映射已存在，请先删除后重新添加"
+            await db.add_sys_log("WARNING", f"添加频道映射失败: {message} ({src} -> {tgt})")
+            return {"status": "error", "message": message}
         if await db.would_create_channel_mapping_cycle(src, tgt):
-            return {"status": "error", "message": "该映射会形成循环同步，已拒绝保存"}
+            message = "该映射会形成循环同步，已拒绝保存"
+            await db.add_sys_log("WARNING", f"添加频道映射失败: {message} ({src} -> {tgt})")
+            return {"status": "error", "message": message}
         await db.add_channel_mapping(
             src,
             tgt,
@@ -451,6 +457,7 @@ async def add_mapping(
         await db.add_sys_log("INFO", f"添加频道映射: {src} -> {tgt}")
         return {"status": "success", "message": "映射规则添加成功"}
     except Exception as exc:
+        await db.add_sys_log("WARNING", f"添加频道映射失败: {exc}")
         return {"status": "error", "message": str(exc)}
 
 

@@ -51,25 +51,22 @@
         </div>
     </div>
 
-    <div v-if="notice.message" class="mb-6 rounded-lg border px-4 py-3 text-sm"
-         :class="notice.type === 'error' ? 'border-red-200 bg-red-50 text-red-700' : 'border-slate-200 bg-slate-50 text-slate-700'">
-        {{ notice.message }}
-    </div>
+    <toast-banner :notice="notice"></toast-banner>
 
     <setup-wizard v-if="currentView === 'setup'" :config="configForm" :saving="configSaving" @save="saveSetup"></setup-wizard>
 
     <template v-else-if="currentView === 'home'">
         <status-overview :app-info="appInfo" :status="syncStatus" @open-settings="openSettings"></status-overview>
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            <div class="space-y-6">
-                <channel-mapping :mappings="mappings" @add="addMapping" @del="deleteMapping"></channel-mapping>
+        <div class="console-layout">
+            <div class="console-main">
                 <sync-panel :status="syncStatus" :form="syncForm" :stopping="stopping" @start="startSync" @stop="stopSync"></sync-panel>
+                <log-viewer :sys-logs="sysLogs" :msg-logs="msgLogs" @clear-sys-logs="clearSystemLogs" @clear-msg-logs="clearMessageLogs"></log-viewer>
             </div>
-            <div class="space-y-6">
+            <div class="console-side">
+                <channel-mapping :mappings="mappings" @add="addMapping" @del="deleteMapping" @log-error="showAppError"></channel-mapping>
                 <global-filters :settings="settings" :rules="filterRules" :new-rule="newFilter" @save-settings="saveGlobalSettings" @add-rule="addFilter" @del-rule="deleteFilter"></global-filters>
             </div>
         </div>
-        <log-viewer class="mt-6" :sys-logs="sysLogs" :msg-logs="msgLogs" @clear-sys-logs="clearSystemLogs" @clear-msg-logs="clearMessageLogs"></log-viewer>
     </template>
 
     <settings-panel v-else :config="configForm" :saving="configSaving" :user-auth="userAuth" :auth-submitting="authSubmitting" :send-code-cooldown="sendCodeCooldown" @save-config="saveSettingsPage" @save-restart="saveAndRestart" @send-code="sendUserCode" @verify-code="verifyUserCode" @submit-password="submitUserPassword" @cancel-auth="cancelUserAuth" @switch-account="switchUserAccount"></settings-panel>
@@ -96,6 +93,7 @@
         </div>
     </footer>
 </div>
+<script src="/static/ui-components.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>
