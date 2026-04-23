@@ -18,6 +18,12 @@ AIO_MEDIA_CLS = {"photo": AioPhoto, "video": AioVideo, "audio": AioAudio, "docum
 PYRO_MEDIA_CLS = {"photo": InputMediaPhoto, "video": InputMediaVideo, "audio": InputMediaAudio, "document": InputMediaDocument}
 
 
+def _item_id(item):
+    if isinstance(item, dict):
+        return item.get("id") or item.get("message_id")
+    return getattr(item, "id", None) or getattr(item, "message_id", None)
+
+
 def build_bot_media_group(downloaded_files, rewritten_captions, thumbnail_paths, total_bytes, label, spoiler_flags=None):
     """
     构建 aiogram 媒体组
@@ -38,7 +44,7 @@ def build_bot_media_group(downloaded_files, rewritten_captions, thumbnail_paths,
         media_cls = AIO_MEDIA_CLS.get(item_type, AIO_MEDIA_CLS["document"])
         file_label = format_upload_label(item_type, path, index=index, total=len(downloaded_files))
         media_input = ProgressFSInputFile(path, tracker, file_label)
-        thumbnail_path = thumbnail_paths.get(getattr(item, "id", None) or item.get("id"))
+        thumbnail_path = thumbnail_paths.get(_item_id(item))
         thumbnail_input = FSInputFile(thumbnail_path) if thumbnail_path and os.path.exists(thumbnail_path) else None
         
         media_kwargs = {"media": media_input, "caption": normalize_bot_html(caption_html), "parse_mode": "HTML"}
@@ -72,7 +78,7 @@ def build_user_media_group(downloaded_files, rewritten_captions, thumbnail_paths
     
     for index, (item, path, item_type) in enumerate(downloaded_files):
         media_cls = PYRO_MEDIA_CLS.get(item_type, PYRO_MEDIA_CLS["document"])
-        thumbnail_path = thumbnail_paths.get(getattr(item, "id", None) or item.get("id"))
+        thumbnail_path = thumbnail_paths.get(_item_id(item))
         
         media_kwargs = {
             "media": path,

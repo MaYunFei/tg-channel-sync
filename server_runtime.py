@@ -1,0 +1,102 @@
+import json
+import os
+import socket
+import threading
+import time
+import urllib.request
+from asyncio import Event
+from urllib.error import URLError
+
+import webbrowser
+
+
+_BROWSER_OPEN_LOCK = threading.Lock()
+_BROWSER_OPENED_URLS: set[str] = set()
+
+
+def browser_url(host: str, port: int) -> str:
+    browser_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+    return f"http://{browser_host}:{port}"
+
+
+def should_auto_open_browser(server_cfg: dict) -> bool:
+    disabled_by_env = os.getenv("TG_CHANNEL_SYNC_NO_BROWSER", "").strip().lower() in {"1", "true", "yes", "on"}
+    return bool(server_cfg.get("auto_open_browser", False)) and not disabled_by_env
+
+
+def _is_port_open(host: str, port: int) -> bool:
+    target_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+    try:
+        with socket.create_connection((target_host, port), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
+def _request_json(url: str, timeout: float = 1.0):
+    request = urllib.request.Request(url, headers={"User-Agent": "tg-channel-sync"})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _is_our_instance_running(host: str, port: int) -> bool:
+    base_url = browser_url(host, port)
+    try:
+        health = _request_json(f"{base_url}/health")
+        if health.get("status") != "ok":
+            return False
+        app_info = _request_json(f"{base_url}/api/app_info")
+        return isinstance(app_info, dict) and "bot" in app_info and "user" in app_info
+    except Exception:
+        return False
+
+
+def reuse_existing_instance_or_exit(host: str, port: int, auto_open_browser: bool) -> bool:
+    if not _is_port_open(host, port):
+        return True
+
+    for _ in range(10):
+        if _is_our_instance_running(host, port):
+            url = browser_url(host, port)
+            print(f"[INFO] 检测到程序已在运行，复用现有实例: {url}")
+            if auto_open_browser:
+                webbrowser.open(url)
+            return False
+        time.sleep(0.3)
+
+    print(
+        f"[ERROR] 端口 {port} 已被其他程序占用，当前实例不会启动。"
+        f" 请修改设置中的服务端口，或关闭占用该端口的程序后重试。"
+    )
+    return False
+
+
+def launch_browser_when_ready(host: str, port: int, shutdown_event: Event) -> None:
+    url = browser_url(host, port)
+    health_url = f"{url}/health"
+
+    with _BROWSER_OPEN_LOCK:
+        if url in _BROWSER_OPENED_URLS:
+            return
+        _BROWSER_OPENED_URLS.add(url)
+
+    def _worker():
+        try:
+            for _ in range(60):
+                if shutdown_event.is_set():
+                    return
+                try:
+                    with urllib.request.urlopen(health_url, timeout=1) as response:
+                        if response.status == 200:
+                            webbrowser.open(url)
+                            return
+                except (URLError, TimeoutError, OSError, ValueError):
+                    pass
+                except Exception:
+                    return
+                threading.Event().wait(0.5)
+        finally:
+            with _BROWSER_OPEN_LOCK:
+                _BROWSER_OPENED_URLS.discard(url)
+
+    threading.Thread(target=_worker, daemon=True, name="browser-launcher").start()

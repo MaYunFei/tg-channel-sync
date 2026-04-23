@@ -34,6 +34,11 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         await database.init_db()
 
         self.assertEqual(await database.get_target_channels(1001), [2001])
+        [mapping] = await database.get_target_channel_mappings(1001)
+        self.assertEqual(mapping["target_id"], 2001)
+        self.assertEqual(mapping["realtime_sender"], "bot")
+        self.assertTrue(mapping["realtime_fallback_to_user"])
+        self.assertFalse(mapping["realtime_hash_perturb"])
         self.assertEqual(await database.get_target_msg_id(1001, 11, 2001), 99)
 
     async def test_log_retention_keeps_latest_100(self):
@@ -53,3 +58,44 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(await database.get_target_msg_id(1, 10, 100), 500)
         self.assertEqual(await database.get_target_msg_id(1, 10, 200), 600)
+
+    async def test_channel_mapping_realtime_options_are_per_mapping(self):
+        await database.init_db()
+        await database.add_channel_mapping(
+            1,
+            100,
+            realtime_sender="user",
+            realtime_fallback_to_user=False,
+            realtime_hash_perturb=True,
+        )
+        await database.add_channel_mapping(1, 200)
+
+        mappings = await database.get_target_channel_mappings(1)
+
+        self.assertEqual(
+            mappings,
+            [
+                {
+                    "target_id": 100,
+                    "realtime_sender": "user",
+                    "realtime_fallback_to_user": False,
+                    "realtime_hash_perturb": True,
+                },
+                {
+                    "target_id": 200,
+                    "realtime_sender": "bot",
+                    "realtime_fallback_to_user": True,
+                    "realtime_hash_perturb": False,
+                },
+            ],
+        )
+
+    async def test_channel_mapping_duplicate_and_cycle_detection(self):
+        await database.init_db()
+        await database.add_channel_mapping(1, 2)
+        await database.add_channel_mapping(2, 3)
+
+        self.assertTrue(await database.has_channel_mapping(1, 2))
+        self.assertTrue(await database.would_create_channel_mapping_cycle(1, 1))
+        self.assertTrue(await database.would_create_channel_mapping_cycle(3, 1))
+        self.assertFalse(await database.would_create_channel_mapping_cycle(3, 4))

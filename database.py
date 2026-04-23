@@ -125,6 +125,21 @@ async def _migrate_channel_mappings(conn: aiosqlite.Connection) -> None:
             old_channel_rows,
         )
         await conn.execute("DROP TABLE channel_mappings_old")
+    for column_name, column_sql in (
+        ("realtime_sender", "ALTER TABLE channel_mappings ADD COLUMN realtime_sender TEXT NOT NULL DEFAULT 'bot'"),
+        (
+            "realtime_fallback_to_user",
+            "ALTER TABLE channel_mappings ADD COLUMN realtime_fallback_to_user INTEGER NOT NULL DEFAULT 1",
+        ),
+        (
+            "realtime_hash_perturb",
+            "ALTER TABLE channel_mappings ADD COLUMN realtime_hash_perturb INTEGER NOT NULL DEFAULT 0",
+        ),
+    ):
+        try:
+            await conn.execute(column_sql)
+        except Exception:
+            pass
 
 
 async def _migrate_message_mappings(conn: aiosqlite.Connection) -> None:
@@ -234,10 +249,29 @@ async def init_db():
         await conn.commit()
 
 
-async def add_channel_mapping(source_id: int, target_id: int):
+async def add_channel_mapping(
+    source_id: int,
+    target_id: int,
+    realtime_sender: str = "bot",
+    realtime_fallback_to_user: bool = True,
+    realtime_hash_perturb: bool = False,
+):
+    realtime_sender = "user" if str(realtime_sender).strip() == "user" else "bot"
     await _execute(
-        "INSERT OR IGNORE INTO channel_mappings (source_id, target_id) VALUES (?, ?)",
-        (source_id, target_id),
+        "INSERT INTO channel_mappings "
+        "(source_id, target_id, realtime_sender, realtime_fallback_to_user, realtime_hash_perturb) "
+        "VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT(source_id, target_id) DO UPDATE SET "
+        "realtime_sender = excluded.realtime_sender, "
+        "realtime_fallback_to_user = excluded.realtime_fallback_to_user, "
+        "realtime_hash_perturb = excluded.realtime_hash_perturb",
+        (
+            source_id,
+            target_id,
+            realtime_sender,
+            1 if realtime_fallback_to_user else 0,
+            1 if realtime_hash_perturb else 0,
+        ),
         commit=True,
     )
 
@@ -253,13 +287,62 @@ async def delete_channel_mapping(source_id: int, target_id: int | None = None):
     )
 
 
+async def has_channel_mapping(source_id: int, target_id: int) -> bool:
+    row = await _fetchone(
+        "SELECT 1 FROM channel_mappings WHERE source_id = ? AND target_id = ?",
+        (source_id, target_id),
+    )
+    return row is not None
+
+
+async def would_create_channel_mapping_cycle(source_id: int, target_id: int) -> bool:
+    if source_id == target_id:
+        return True
+    rows = await _fetchall("SELECT source_id, target_id FROM channel_mappings")
+    adjacency: dict[int, set[int]] = {}
+    for current_source, current_target in rows:
+        adjacency.setdefault(current_source, set()).add(current_target)
+
+    stack = [target_id]
+    visited = set()
+    while stack:
+        current = stack.pop()
+        if current == source_id:
+            return True
+        if current in visited:
+            continue
+        visited.add(current)
+        stack.extend(adjacency.get(current, ()))
+    return False
+
+
 async def get_target_channels(source_id: int) -> list[int]:
     rows = await _fetchall("SELECT target_id FROM channel_mappings WHERE source_id = ? ORDER BY target_id", (source_id,))
     return [row[0] for row in rows]
 
 
+async def get_target_channel_mappings(source_id: int) -> list[dict]:
+    rows = await _fetchall(
+        "SELECT target_id, realtime_sender, realtime_fallback_to_user, realtime_hash_perturb "
+        "FROM channel_mappings WHERE source_id = ? ORDER BY target_id",
+        (source_id,),
+    )
+    return [
+        {
+            "target_id": row[0],
+            "realtime_sender": row[1] or "bot",
+            "realtime_fallback_to_user": bool(row[2]),
+            "realtime_hash_perturb": bool(row[3]),
+        }
+        for row in rows
+    ]
+
+
 async def get_all_channel_mappings() -> list:
-    return await _fetchall("SELECT source_id, target_id FROM channel_mappings ORDER BY target_id, source_id")
+    return await _fetchall(
+        "SELECT source_id, target_id, realtime_sender, realtime_fallback_to_user, realtime_hash_perturb "
+        "FROM channel_mappings ORDER BY target_id, source_id"
+    )
 
 
 async def save_msg_mapping(

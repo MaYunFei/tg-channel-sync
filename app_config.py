@@ -37,6 +37,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "bot_rate_limit_gb": 10,
         "bot_rate_limit_window_hours": 24,
         "bot_rate_limit_cooldown_minutes": 300,
+        "realtime_sender": "bot",
+        "realtime_fallback_to_user": True,
+        "realtime_hash_perturb": False,
     },
     "app": {
         "portable_mode": True,
@@ -96,6 +99,9 @@ def _normalize_config(config: dict[str, Any]) -> dict[str, Any]:
     sync["bot_rate_limit_gb"] = max(0.1, float(sync.get("bot_rate_limit_gb", 10) or 10))
     sync["bot_rate_limit_window_hours"] = max(1.0, float(sync.get("bot_rate_limit_window_hours", 24) or 24))
     sync["bot_rate_limit_cooldown_minutes"] = max(1.0, float(sync.get("bot_rate_limit_cooldown_minutes", 300) or 300))
+    sync["realtime_sender"] = "user" if str(sync.get("realtime_sender", "bot")).strip() == "user" else "bot"
+    sync["realtime_fallback_to_user"] = bool(sync.get("realtime_fallback_to_user", True))
+    sync["realtime_hash_perturb"] = bool(sync.get("realtime_hash_perturb", False))
     return merged
 
 

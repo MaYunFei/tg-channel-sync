@@ -1,5 +1,6 @@
 ﻿import asyncio
 import logging
+import os
 import time
 from math import ceil
 
@@ -9,6 +10,7 @@ from aiogram.client.telegram import TelegramAPIServer
 from aiogram.types import Message
 from aiogram.types import ReplyParameters
 from pyrogram import Client, raw
+from pyrogram.enums import ParseMode
 from pyrogram.errors import SessionPasswordNeeded
 
 import database as db
@@ -20,7 +22,22 @@ from services.sync_services import (
     resolve_reply_for_forward,
     rewrite_message_links,
 )
+from sync_worker.core.progress import (
+    ProgressFSInputFile,
+    UploadProgressTracker,
+    build_pyro_progress_callback,
+    format_upload_label,
+)
 from sync_worker.core.text import prepend_source_header_html
+from sync_worker.media import prepare_media_for_send
+from sync_worker.runtime import TEMP_DIR
+from sync_worker.senders import (
+    build_bot_media_group,
+    build_user_media_group,
+    dynamic_send,
+    resolve_upload_target,
+    should_fallback_to_user,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -41,6 +58,7 @@ user_auth_state = {
 upload_bot_rr_index = 0
 
 MSG_TYPES = ["photo", "video", "animation", "audio", "voice", "sticker", "document"]
+REALTIME_REUPLOAD_TYPES = {"photo", "video", "animation", "audio", "voice", "sticker", "document"}
 
 
 def _telegram_config():
@@ -264,6 +282,197 @@ def get_msg_type(msg: Message) -> str:
     return next((msg_type for msg_type in MSG_TYPES if getattr(msg, msg_type, None)), "text")
 
 
+def _realtime_sync_options(mapping: dict | None = None) -> dict:
+    sync_config = get_config().get("sync", {})
+    mapping = mapping or {}
+    return {
+        "sender": "user" if mapping.get("realtime_sender", sync_config.get("realtime_sender")) == "user" else "bot",
+        "fallback_to_user": bool(mapping.get("realtime_fallback_to_user", sync_config.get("realtime_fallback_to_user", True))),
+        "hash_perturb": bool(mapping.get("realtime_hash_perturb", sync_config.get("realtime_hash_perturb", False))),
+        "include_external_source_header": bool(sync_config.get("add_external_source_header", False)),
+    }
+
+
+def _realtime_needs_reupload(msg_type: str, options: dict) -> bool:
+    return msg_type in REALTIME_REUPLOAD_TYPES and (
+        options["sender"] == "user" or (options["hash_perturb"] and msg_type in {"photo", "video"})
+    )
+
+
+def _get_aiogram_media_object(message: Message, msg_type: str):
+    media_obj = getattr(message, msg_type, None)
+    if msg_type == "photo" and media_obj:
+        return media_obj[-1]
+    return media_obj
+
+
+def _build_realtime_download_path(message: Message, msg_type: str) -> str:
+    media_obj = _get_aiogram_media_object(message, msg_type)
+    original_name = str(getattr(media_obj, "file_name", "") or "").strip()
+    base_name, ext = os.path.splitext(original_name)
+    if not base_name:
+        default_ext = {
+            "photo": ".jpg",
+            "video": ".mp4",
+            "animation": ".mp4",
+            "audio": ".mp3",
+            "voice": ".ogg",
+            "sticker": ".webp",
+            "document": "",
+        }
+        ext = ext or default_ext.get(msg_type, "")
+        base_name = f"{msg_type}_{message.message_id}"
+    safe_name = "".join("_" if char in '<>:"/\\|?*' else char for char in f"{base_name}{ext}")
+    return os.path.join(TEMP_DIR, f"rt_{message.message_id}_{safe_name}")
+
+
+async def _download_realtime_media(message: Message, msg_type: str) -> str | None:
+    media_obj = _get_aiogram_media_object(message, msg_type)
+    if media_obj is None:
+        return None
+    target_path = _build_realtime_download_path(message, msg_type)
+    await aiogram_bot.download(media_obj, destination=target_path, timeout=3600)
+    return target_path if os.path.exists(target_path) else None
+
+
+async def _send_realtime_text_with_identity(target_id, text_html, reply_to_id, quote_data, options):
+    sender = options["sender"]
+    client = aiogram_bot if sender == "bot" else pyro_user_app
+    if sender == "user" and not getattr(client, "is_initialized", False):
+        raise RuntimeError("实时同步使用辅助账号发送前，请先完成辅助账号登录")
+    sent = await dynamic_send(
+        client,
+        "text",
+        target_id,
+        None,
+        text_html,
+        "HTML" if sender == "bot" else ParseMode.HTML,
+        reply_to_message_id=reply_to_id,
+        quote_data=quote_data if reply_to_id else None,
+    )
+    return sent.message_id if sender == "bot" else sent.id
+
+
+async def _send_realtime_media_upload(source_id, target_id, message, msg_type, text_html, reply_to_id, quote_data, options):
+    file_path = await _download_realtime_media(message, msg_type)
+    if not file_path:
+        return None
+    try:
+        file_path = await prepare_media_for_send(file_path, msg_type, message.message_id, options["hash_perturb"])
+        file_size = os.path.getsize(file_path)
+        upload_target = await resolve_upload_target(
+            options["sender"],
+            pyro_user_app,
+            [file_size],
+            allow_user_fallback=should_fallback_to_user(options["sender"], options["fallback_to_user"]),
+            wait_for_available_bot=not should_fallback_to_user(options["sender"], options["fallback_to_user"]),
+        )
+        actual_sender = upload_target["sender"]
+        client = upload_target["client"]
+        if actual_sender == "user" and not getattr(client, "is_initialized", False):
+            raise RuntimeError("实时同步使用辅助账号发送前，请先完成辅助账号登录")
+        file_label = format_upload_label(msg_type, file_path)
+        tracker = UploadProgressTracker(f"实时上传 [{upload_target['label']}]", file_size)
+        media_arg = ProgressFSInputFile(file_path, tracker, file_label) if actual_sender == "bot" else file_path
+        sent = await dynamic_send(
+            client,
+            msg_type,
+            target_id,
+            media_arg,
+            text_html,
+            upload_target["parse_mode"],
+            reply_to_message_id=reply_to_id,
+            quote_data=quote_data if reply_to_id else None,
+            progress=build_pyro_progress_callback(tracker, file_label, total_bytes=file_size) if actual_sender != "bot" else None,
+        )
+        if actual_sender == "bot":
+            await note_upload_success(client, file_size)
+        return sent.message_id if actual_sender == "bot" else sent.id
+    except Exception:
+        if options["sender"] == "bot" and options["fallback_to_user"] and getattr(pyro_user_app, "is_initialized", False):
+            await db.add_msg_log("BOT_FALLBACK", f"实时同步 消息ID:{message.message_id} | Bot 上传失败，已回退辅助账号重传")
+            file_size = os.path.getsize(file_path)
+            file_label = format_upload_label(msg_type, file_path)
+            tracker = UploadProgressTracker("实时上传 [辅助账号回退]", file_size)
+            sent = await dynamic_send(
+                pyro_user_app,
+                msg_type,
+                target_id,
+                file_path,
+                text_html,
+                ParseMode.HTML,
+                reply_to_message_id=reply_to_id,
+                quote_data=quote_data if reply_to_id else None,
+                progress=build_pyro_progress_callback(tracker, file_label, total_bytes=file_size),
+            )
+            return sent.id
+        raise
+    finally:
+        try:
+            os.remove(file_path)
+        except Exception:
+            pass
+
+
+async def _send_realtime_media_group_upload(source_id, target_id, group, captions, reply_to_id, quote_data, options):
+    downloaded_files = []
+    try:
+        for item in group:
+            item_type = get_msg_type(item)
+            path = await _download_realtime_media(item, item_type)
+            if not path:
+                return None
+            path = await prepare_media_for_send(path, item_type, item.message_id, options["hash_perturb"])
+            downloaded_files.append((item, path, "video" if item_type == "animation" else item_type))
+        file_sizes = [os.path.getsize(path) for _, path, _ in downloaded_files]
+        upload_target = await resolve_upload_target(
+            options["sender"],
+            pyro_user_app,
+            file_sizes,
+            allow_user_fallback=should_fallback_to_user(options["sender"], options["fallback_to_user"]),
+            wait_for_available_bot=not should_fallback_to_user(options["sender"], options["fallback_to_user"]),
+        )
+        actual_sender = upload_target["sender"]
+        client = upload_target["client"]
+        if actual_sender == "user" and not getattr(client, "is_initialized", False):
+            raise RuntimeError("实时同步使用辅助账号发送前，请先完成辅助账号登录")
+        if actual_sender == "bot":
+            _, media = build_bot_media_group(downloaded_files, captions, {}, sum(file_sizes), upload_target["label"])
+        else:
+            tracker = UploadProgressTracker(f"实时上传媒体组 [{upload_target['label']}]", sum(file_sizes))
+            media = build_user_media_group(downloaded_files, captions, {})
+        kwargs = {"chat_id": target_id, "media": media}
+        if reply_to_id:
+            kwargs["reply_to_message_id"] = reply_to_id
+        if quote_data and reply_to_id and actual_sender == "user":
+            kwargs["quote_text"] = quote_data["text"]
+            if quote_data.get("entities"):
+                kwargs["quote_entities"] = quote_data["entities"]
+        if actual_sender == "user":
+            kwargs["progress"] = build_pyro_progress_callback(
+                tracker,
+                f"实时上传媒体组: {len(downloaded_files)} 项",
+                total_bytes=sum(file_sizes),
+            )
+        sent_msgs = await client.send_media_group(**kwargs)
+        if actual_sender == "bot":
+            await note_upload_success(client, sum(file_sizes))
+        return [sent.message_id if actual_sender == "bot" else sent.id for sent in sent_msgs]
+    except Exception:
+        if options["sender"] == "bot" and options["fallback_to_user"] and getattr(pyro_user_app, "is_initialized", False):
+            await db.add_msg_log("BOT_FALLBACK", f"实时同步 组首ID:{group[0].message_id} | Bot 上传失败，已回退辅助账号重传")
+            media = build_user_media_group(downloaded_files, captions, {})
+            sent_msgs = await pyro_user_app.send_media_group(chat_id=target_id, media=media)
+            return [sent.id for sent in sent_msgs]
+        raise
+    finally:
+        for _, path, _ in downloaded_files:
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+
+
 async def is_type_allowed(msg_type: str) -> bool:
     settings = await db.get_all_settings()
     key_map = {msg_type: f"sync_{msg_type}" for msg_type in MSG_TYPES}
@@ -277,8 +486,8 @@ async def handle_new_post(message: Message):
         return
 
     source_id = message.chat.id
-    target_ids = await db.get_target_channels(source_id)
-    if not target_ids:
+    target_mappings = await db.get_target_channel_mappings(source_id)
+    if not target_mappings:
         return
 
     chat_name = get_chat_name(message.chat)
@@ -297,9 +506,7 @@ async def handle_new_post(message: Message):
                 group = sorted(media_group_cache.pop(mg_id), key=lambda item: item.message_id)
                 quote_data = get_quote_payload(group[0])
                 
-                # 检查是否启用外部来源前缀
-                sync_config = get_config().get("sync", {})
-                include_external_source_header = bool(sync_config.get("add_external_source_header", False))
+                include_external_source_header = _realtime_sync_options(target_mappings[0])["include_external_source_header"]
                 
                 for item in group:
                     text_html = item.html_text if item.text or item.caption else ""
@@ -311,9 +518,35 @@ async def handle_new_post(message: Message):
 
                 msg_ids = [item.message_id for item in group]
                 await db.add_msg_log("RECV_GROUP", f"[{chat_name}] 媒体组消息ID:{msg_ids}")
-                for target_id in target_ids:
+                for target_mapping in target_mappings:
+                    target_id = target_mapping["target_id"]
+                    realtime_options = _realtime_sync_options(target_mapping)
                     reply_to_id = await resolve_reply_for_forward(source_id, target_id, group[0].message_id, getattr(group[0], "reply_to_message_id", None))
                     try:
+                        if any(_realtime_needs_reupload(get_msg_type(item), realtime_options) for item in group):
+                            captions = []
+                            link_context = await build_link_rewrite_context(aiogram_bot, source_id, target_id)
+                            for item in group:
+                                item_text = item.html_text if item.text or item.caption else ""
+                                if include_external_source_header:
+                                    item_text = prepend_source_header_html(item_text, item, enabled=True)
+                                item_text, _ = await rewrite_message_links(item_text, source_id, link_context)
+                                captions.append(item_text)
+                            sent_ids = await _send_realtime_media_group_upload(
+                                source_id,
+                                target_id,
+                                group,
+                                captions,
+                                reply_to_id,
+                                quote_data,
+                                realtime_options,
+                            )
+                            if not sent_ids:
+                                continue
+                            for original, sent_id in zip(group, sent_ids):
+                                await db.save_msg_mapping(source_id, original.message_id, target_id, sent_id)
+                            await db.add_msg_log("SEND_GROUP", f"源频道:{source_id} | 目标频道:{target_id} | 媒体组消息ID:{msg_ids} | 重传成功")
+                            continue
                         # 如果启用外部来源前缀，需要逐条复制并添加前缀
                         if include_external_source_header:
                             await db.add_msg_log("WARN", f"目标频道:{target_id} | 媒体组启用外部来源前缀，使用逐条复制模式")
@@ -392,11 +625,11 @@ async def handle_new_post(message: Message):
         await db.add_msg_log("DROP_REGEX", f"[{chat_name}] 消息ID:{message.message_id} | 已被正则过滤拦截")
         return
     
-    # 检查是否启用外部来源前缀
-    sync_config = get_config().get("sync", {})
-    include_external_source_header = bool(sync_config.get("add_external_source_header", False))
+    include_external_source_header = _realtime_sync_options(target_mappings[0])["include_external_source_header"]
     
-    for target_id in target_ids:
+    for target_mapping in target_mappings:
+        target_id = target_mapping["target_id"]
+        realtime_options = _realtime_sync_options(target_mapping)
         link_context = await build_link_rewrite_context(aiogram_bot, source_id, target_id)
         target_html, rewrite_count = await rewrite_message_links(new_html, source_id, link_context)
         
@@ -409,7 +642,21 @@ async def handle_new_post(message: Message):
         reply_to_id = await resolve_reply_for_forward(source_id, target_id, message.message_id, getattr(message, "reply_to_message_id", None))
 
         try:
-            if target_html != text_html:
+            sent_id = None
+            if not has_media and realtime_options["sender"] == "user":
+                sent_id = await _send_realtime_text_with_identity(target_id, target_html, reply_to_id, quote_data, realtime_options)
+            elif has_media and _realtime_needs_reupload(msg_type, realtime_options):
+                sent_id = await _send_realtime_media_upload(
+                    source_id,
+                    target_id,
+                    message,
+                    msg_type,
+                    target_html,
+                    reply_to_id,
+                    quote_data,
+                    realtime_options,
+                )
+            elif target_html != text_html:
                 kwargs = {"chat_id": target_id, "parse_mode": "HTML"}
                 if not has_media:
                     kwargs["text"] = target_html
@@ -429,6 +676,7 @@ async def handle_new_post(message: Message):
                     if quote_data.get("entities"):
                         kwargs["quote_entities"] = quote_data["entities"]
                 copied = await (aiogram_bot.send_message(**kwargs) if not has_media else aiogram_bot.copy_message(**kwargs))
+                sent_id = copied.message_id
             else:
                 kwargs = {"chat_id": target_id, "from_chat_id": source_id, "message_id": message.message_id}
                 if reply_to_id:
@@ -438,11 +686,14 @@ async def handle_new_post(message: Message):
                     if quote_data.get("entities"):
                         kwargs["quote_entities"] = quote_data["entities"]
                 copied = await aiogram_bot.copy_message(**kwargs)
+                sent_id = copied.message_id
 
-            await db.save_msg_mapping(source_id, message.message_id, target_id, copied.message_id)
+            if sent_id is None:
+                continue
+            await db.save_msg_mapping(source_id, message.message_id, target_id, sent_id)
             if quote_data and reply_to_id:
                 await db.add_msg_log("QUOTE_SEND", f"源频道:{source_id} | 目标频道:{target_id} | 消息ID:{message.message_id} | 已保留引用回复")
-            await db.add_msg_log("SEND", f"源频道:{source_id} | 消息ID:{message.message_id} | 目标频道:{target_id} | 新消息ID:{copied.message_id} | 转发成功")
+            await db.add_msg_log("SEND", f"源频道:{source_id} | 消息ID:{message.message_id} | 目标频道:{target_id} | 新消息ID:{sent_id} | 转发成功")
         except Exception as exc:
             await db.add_msg_log("ERROR", f"消息ID:{message.message_id} | 目标频道:{target_id} | 发送失败: {exc}")
 

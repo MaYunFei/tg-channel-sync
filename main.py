@@ -1,17 +1,9 @@
 ﻿import asyncio
 import json
-import os
-import socket
 import shutil
 import signal
 import sys
-import threading
-import time
-import urllib.request
 from contextlib import asynccontextmanager
-from urllib.error import URLError
-
-import webbrowser
 
 import uvicorn
 from fastapi import BackgroundTasks, FastAPI, Form, Request
@@ -22,6 +14,7 @@ import bot_engine
 import database as db
 from app_config import get_config, get_setup_status, save_config
 from app_paths import ensure_runtime_dirs, static_dir, temp_dir
+from server_runtime import launch_browser_when_ready, reuse_existing_instance_or_exit, should_auto_open_browser
 from services.sync_services import normalize_channel_username, resolve_chat_id
 from services.version_service import GITHUB_REPO, get_local_version, get_remote_version_info, is_version_at_least
 from sync_worker import process_master_sync, sync_state
@@ -48,8 +41,8 @@ SHUTDOWN_EVENT = asyncio.Event()
 SERVER = None
 RESTART_REQUESTED = False
 STOP_REQUESTED = False
-_BROWSER_OPEN_LOCK = threading.Lock()
-_BROWSER_OPENED_URLS: set[str] = set()
+
+
 def refresh_app_info(bot_info=None, user_info=None):
     if bot_info:
         app_info_cache["bot"].update(bot_info)
@@ -410,24 +403,51 @@ async def restart_server():
 
 @app.get("/api/mappings")
 async def get_mappings():
-    mappings = [{"source_id": row[0], "target_id": row[1]} for row in await db.get_all_channel_mappings()]
+    mappings = [
+        {
+            "source_id": row[0],
+            "target_id": row[1],
+            "realtime_sender": row[2] or "bot",
+            "realtime_fallback_to_user": bool(row[3]),
+            "realtime_hash_perturb": bool(row[4]),
+        }
+        for row in await db.get_all_channel_mappings()
+    ]
     grouped = {}
     for item in mappings:
         target_id = item["target_id"]
-        grouped.setdefault(target_id, []).append(item["source_id"])
+        grouped.setdefault(target_id, []).append(item)
     grouped_mappings = [
-        {"target_id": target_id, "source_ids": sorted(source_ids)}
-        for target_id, source_ids in sorted(grouped.items(), key=lambda pair: pair[0])
+        {"target_id": target_id, "sources": sorted(sources, key=lambda item: item["source_id"])}
+        for target_id, sources in sorted(grouped.items(), key=lambda pair: pair[0])
     ]
     return {"mappings": mappings, "grouped_mappings": grouped_mappings}
 
 
 @app.post("/api/mappings")
-async def add_mapping(source_id: str = Form(...), target_id: str = Form(...)):
+async def add_mapping(
+    source_id: str = Form(...),
+    target_id: str = Form(...),
+    realtime_sender: str = Form("bot"),
+    realtime_fallback_to_user: str = Form("1"),
+    realtime_hash_perturb: str = Form("0"),
+):
     try:
         src = await resolve_chat_id(bot_engine.aiogram_bot, source_id)
         tgt = await resolve_chat_id(bot_engine.aiogram_bot, target_id)
-        await db.add_channel_mapping(src, tgt)
+        if src == tgt:
+            return {"status": "error", "message": "源频道和目标频道不能相同"}
+        if await db.has_channel_mapping(src, tgt):
+            return {"status": "error", "message": "该频道映射已存在，请先删除后重新添加"}
+        if await db.would_create_channel_mapping_cycle(src, tgt):
+            return {"status": "error", "message": "该映射会形成循环同步，已拒绝保存"}
+        await db.add_channel_mapping(
+            src,
+            tgt,
+            realtime_sender=realtime_sender,
+            realtime_fallback_to_user=realtime_fallback_to_user == "1",
+            realtime_hash_perturb=realtime_hash_perturb == "1",
+        )
         await db.add_sys_log("INFO", f"添加频道映射: {src} -> {tgt}")
         return {"status": "success", "message": "映射规则添加成功"}
     except Exception as exc:
@@ -582,7 +602,7 @@ def run_server():
     host = str(server_cfg.get("host", "127.0.0.1") or "127.0.0.1")
     port = int(server_cfg.get("port", 8011))
     if should_auto_open_browser(server_cfg):
-        launch_browser_when_ready(host, port)
+        launch_browser_when_ready(host, port, SHUTDOWN_EVENT)
     uvicorn_config = uvicorn.Config(
         app,
         host=host,
@@ -592,95 +612,6 @@ def run_server():
     SERVER = uvicorn.Server(uvicorn_config)
     SERVER.run()
     SERVER = None
-
-
-def _browser_url(host: str, port: int) -> str:
-    browser_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
-    return f"http://{browser_host}:{port}"
-
-
-def should_auto_open_browser(server_cfg: dict) -> bool:
-    disabled_by_env = os.getenv("TG_CHANNEL_SYNC_NO_BROWSER", "").strip().lower() in {"1", "true", "yes", "on"}
-    return bool(server_cfg.get("auto_open_browser", False)) and not disabled_by_env
-
-
-def _is_port_open(host: str, port: int) -> bool:
-    target_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
-    try:
-        with socket.create_connection((target_host, port), timeout=0.5):
-            return True
-    except OSError:
-        return False
-
-
-def _request_json(url: str, timeout: float = 1.0):
-    request = urllib.request.Request(url, headers={"User-Agent": "tg-channel-sync"})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        return json.loads(response.read().decode("utf-8"))
-
-
-def _is_our_instance_running(host: str, port: int) -> bool:
-    base_url = _browser_url(host, port)
-    try:
-        health = _request_json(f"{base_url}/health")
-        if health.get("status") != "ok":
-            return False
-        app_info = _request_json(f"{base_url}/api/app_info")
-        return isinstance(app_info, dict) and "bot" in app_info and "user" in app_info
-    except Exception:
-        return False
-
-
-def reuse_existing_instance_or_exit(host: str, port: int, auto_open_browser: bool) -> bool:
-    if not _is_port_open(host, port):
-        return True
-
-    for _ in range(10):
-        if _is_our_instance_running(host, port):
-            url = _browser_url(host, port)
-            print(f"[INFO] 检测到程序已在运行，复用现有实例: {url}")
-            if auto_open_browser:
-                webbrowser.open(url)
-            return False
-        time.sleep(0.3)
-
-    print(
-        f"[ERROR] 端口 {port} 已被其他程序占用，当前实例不会启动。"
-        f" 请修改设置中的服务端口，或关闭占用该端口的程序后重试。"
-    )
-    return False
-
-
-def launch_browser_when_ready(host: str, port: int) -> None:
-    url = _browser_url(host, port)
-    health_url = f"{url}/health"
-
-    with _BROWSER_OPEN_LOCK:
-        if url in _BROWSER_OPENED_URLS:
-            return
-        _BROWSER_OPENED_URLS.add(url)
-
-    def _worker():
-        try:
-            for _ in range(60):
-                if SHUTDOWN_EVENT.is_set():
-                    return
-                try:
-                    with urllib.request.urlopen(health_url, timeout=1) as response:
-                        if response.status == 200:
-                            webbrowser.open(url)
-                            return
-                except (URLError, TimeoutError, OSError, ValueError):
-                    pass
-                except Exception:
-                    return
-                threading.Event().wait(0.5)
-        finally:
-            with _BROWSER_OPEN_LOCK:
-                _BROWSER_OPENED_URLS.discard(url)
-
-    threading.Thread(target=_worker, daemon=True, name="browser-launcher").start()
-
 
 if __name__ == "__main__":
     startup_config = get_config()

@@ -1,7 +1,10 @@
 import unittest
+import tempfile
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import bot_engine
+import database
 from services import sync_services
 from sync_worker.clone import process as history
 from sync_worker.core import prepend_source_header_html
@@ -25,6 +28,22 @@ class FakeBot:
 
 
 class SyncServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.temp_dir.name) / "data.db"
+        self.original_db_file = database.DB_FILE
+        self.original_ensure_dirs = database.ensure_runtime_dirs
+        database.DB_FILE = str(self.db_path)
+        database.ensure_runtime_dirs = lambda: self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        await database.close_db()
+        await database.init_db()
+
+    async def asyncTearDown(self):
+        await database.close_db()
+        database.DB_FILE = self.original_db_file
+        database.ensure_runtime_dirs = self.original_ensure_dirs
+        self.temp_dir.cleanup()
+
     async def test_resolve_chat_id_supports_username_and_url(self):
         bot = FakeBot()
 
