@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ..core import build_json_text, get_msg_meta
+from ..core import get_msg_meta
 from .helpers import JSON_MEDIA_GROUP_WINDOW_SECONDS
 
 JSON_MEDIA_GROUP_MAX_ITEMS = 10
@@ -30,10 +30,6 @@ def _json_can_group_media(msg: dict) -> bool:
     return (_json_group_family(msg) or "") in {"visual", "audio", "document"}
 
 
-def _json_has_caption(msg: dict) -> bool:
-    return bool(str(build_json_text(msg) or "").strip())
-
-
 def _json_should_append_to_heuristic_group(group: list[dict], msg: dict, window_seconds: int) -> bool:
     if not group or not _json_can_group_media(msg):
         return False
@@ -49,11 +45,6 @@ def _json_should_append_to_heuristic_group(group: list[dict], msg: dict, window_
     prev_ts = _json_message_timestamp(prev)
     curr_ts = _json_message_timestamp(msg)
     if prev_ts and curr_ts and curr_ts - prev_ts > max(1, int(window_seconds or JSON_MEDIA_GROUP_WINDOW_SECONDS)):
-        return False
-    if _json_group_family(msg) != "visual":
-        return True
-    caption_count = sum(1 for item in group if _json_has_caption(item))
-    if _json_has_caption(msg) and caption_count >= 1:
         return False
     return True
 

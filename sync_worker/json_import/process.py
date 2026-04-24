@@ -95,14 +95,11 @@ async def _send_json_group_via_user(group, target_id, rewritten_captions, file_e
         raise JsonSyncFatalError("Bot 上传体积超限，且辅助账号未登录，无法回退发送媒体组")
     total_bytes = sum(os.path.getsize(path) for _, path, _ in file_entries)
     tracker = SharedUploadProgressTracker("上传媒体组 [辅助账号回退]", total_bytes)
-    group_family = _json_group_family(group[0])
     normalized_captions = []
     group_items = []
     spoiler_flags = []
     for index, ((item, media_path, media_type), caption_html) in enumerate(zip(file_entries, rewritten_captions), start=1):
         caption = caption_html if caption_html else None
-        if group_family == "visual" and index > 1:
-            caption = None
         normalized_captions.append(caption)
         group_items.append((item, media_path, "video" if media_type == "animation" else media_type))
         spoiler_flags.append(has_media_spoiler(item, media_type, "json"))
@@ -147,6 +144,14 @@ async def send_json_media_group(
     file_entries = []
     spoiler_flags = []
     prepared_temp_paths = []
+    raw_captions = [build_json_text(item, include_external_source_header=False) for item in group]
+    visual_header_index = None
+    if group_family == "visual" and include_external_source_header:
+        for caption_index, caption_text in enumerate(raw_captions):
+            if str(caption_text or "").strip():
+                visual_header_index = caption_index
+                break
+
     for index, item in enumerate(group):
         item_id = int(item.get("id") or 0)
         media_path, media_type, _ = resolve_json_media(item, json_dir)
@@ -160,7 +165,10 @@ async def send_json_media_group(
         file_entries.append((item, media_path, media_type))
         spoiler_flags.append(has_media_spoiler(item, media_type, "json"))
 
-        caption_html = build_json_text(item, include_external_source_header=include_external_source_header)
+        should_add_source_header = include_external_source_header and (
+            group_family != "visual" or visual_header_index == index
+        )
+        caption_html = build_json_text(item, include_external_source_header=should_add_source_header)
         caption_html, rewrite_count = await rewrite_message_links(caption_html, source_scope_id, link_context)
         if rewrite_count:
             await db.add_msg_log("JSON_LINK_REWRITE", f"消息ID:{item_id} | 命中 {rewrite_count} 个链接改写")
@@ -193,8 +201,6 @@ async def send_json_media_group(
             for index, (item, media_path, media_type) in enumerate(file_entries):
                 caption_html = rewritten_captions[index]
                 caption = caption_html if caption_html else None
-                if group_family == "visual" and index > 0:
-                    caption = None
                 normalized_captions.append(caption)
                 group_items.append((item, media_path, "video" if media_type == "animation" else media_type))
             tracker, media_list = build_bot_media_group(group_items, normalized_captions, {}, total_bytes, upload_target["label"], spoiler_flags)

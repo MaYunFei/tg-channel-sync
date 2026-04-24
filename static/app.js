@@ -134,7 +134,49 @@ createApp({
     async stopSync(){ this.stopping = true; await fetch("/api/stop_sync", { method:"POST" }); },
     async restartServer(){ if(this.serverAction) return; if(!window.confirm("确认重启服务吗？")) return; this.serverAction = "restart"; const res = await (await fetch("/api/server/restart", { method:"POST" })).json(); this.showToast(res.message); if(this.sseConnection) this.sseConnection.close(); this.waitForServerReady(); },
     async stopServer(){ if(this.serverAction) return; if(!window.confirm("确认关闭服务吗？")) return; this.serverAction = "stop"; const res = await (await fetch("/api/server/stop", { method:"POST" })).json(); this.showToast(res.message); if(this.sseConnection) this.sseConnection.close(); },
-    async sendUserCode(phoneNumber){ if(this.sendCodeCooldown > 0) return; this.authSubmitting = true; try { const res = await (await fetch("/api/user_auth/send_code", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify({ phone_number: phoneNumber }) })).json(); this.showToast(res.message || "已发送请求", res.status === "error" ? "error" : "info"); if(res.send_code_cooldown){ this.sendCodeCooldown = res.send_code_cooldown; } await this.loadUserAuthStatus(); await this.fetchAppInfo(); } finally { this.authSubmitting = false; } },
+    async sendUserCode(phoneNumber){
+      if(this.sendCodeCooldown > 0 || this.authSubmitting) return;
+      const normalizedPhone = String(phoneNumber || "").trim();
+      if(!normalizedPhone){
+        this.showAppError("发送验证码失败：手机号不能为空");
+        return;
+      }
+      const previousCooldown = this.sendCodeCooldown || 0;
+      this.userAuth = {
+        ...this.userAuth,
+        status: "awaiting_code",
+        awaiting_code: true,
+        phone_number: normalizedPhone,
+      };
+      this.updateUserAuthLabel();
+      this.sendCodeCooldown = Math.max(previousCooldown, 30);
+      this.authSubmitting = true;
+      try {
+        const response = await fetch("/api/user_auth/send_code", {
+          method:"POST",
+          headers:{ "Content-Type":"application/json" },
+          body: JSON.stringify({ phone_number: normalizedPhone }),
+        });
+        const res = await response.json();
+        this.showToast(res.message || "已发送请求", res.status === "error" ? "error" : "info");
+        if(res.status === "error"){
+          this.sendCodeCooldown = previousCooldown;
+        } else if(res.send_code_cooldown){
+          this.sendCodeCooldown = Math.max(this.sendCodeCooldown, Number(res.send_code_cooldown) || 0);
+        }
+        await this.loadUserAuthStatus();
+        await this.fetchAppInfo();
+      } catch(exc) {
+        this.sendCodeCooldown = previousCooldown;
+        this.showAppError(`发送验证码失败：${exc}`);
+        try {
+          await this.loadUserAuthStatus();
+          await this.fetchAppInfo();
+        } catch(_) {}
+      } finally {
+        this.authSubmitting = false;
+      }
+    },
     async verifyUserCode(phoneCode){ this.authSubmitting = true; try { const res = await (await fetch("/api/user_auth/sign_in", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify({ phone_code: phoneCode }) })).json(); this.showToast(res.message || "已提交验证码", res.status === "error" ? "error" : "info"); await this.loadUserAuthStatus(); await this.fetchAppInfo(); } finally { this.authSubmitting = false; } },
     async submitUserPassword(password){ this.authSubmitting = true; try { const res = await (await fetch("/api/user_auth/check_password", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify({ password }) })).json(); this.showToast(res.message || "已提交密码", res.status === "error" ? "error" : "info"); await this.loadUserAuthStatus(); await this.fetchAppInfo(); } finally { this.authSubmitting = false; } },
     async cancelUserAuth(){ this.authSubmitting = true; try { const res = await (await fetch("/api/user_auth/cancel", { method:"POST" })).json(); this.showToast(res.message || "已取消登录", res.status === "error" ? "error" : "info"); await this.loadUserAuthStatus(); await this.fetchAppInfo(); } finally { this.authSubmitting = false; } },

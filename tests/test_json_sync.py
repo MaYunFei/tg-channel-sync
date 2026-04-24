@@ -95,6 +95,35 @@ class JsonSyncTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([[item["id"] for item in group] for group in grouped], [list(range(1, 11)), [11]])
 
+    def test_group_json_messages_keeps_visual_group_with_multiple_captions(self):
+        messages = [
+            {
+                "id": 1,
+                "type": "message",
+                "date_unixtime": "1776427654",
+                "photo": "photos/1.jpg",
+                "text": "第一条说明",
+            },
+            {
+                "id": 2,
+                "type": "message",
+                "date_unixtime": "1776427654",
+                "photo": "photos/2.jpg",
+                "text": "第二条说明",
+            },
+            {
+                "id": 3,
+                "type": "message",
+                "date_unixtime": "1776427655",
+                "photo": "photos/3.jpg",
+                "text": "",
+            },
+        ]
+
+        grouped = json_sync.group_json_messages(messages, 3)
+
+        self.assertEqual([[item["id"] for item in group] for group in grouped], [[1, 2, 3]])
+
     def test_group_json_messages_splits_heuristic_media_group_above_10_items(self):
         messages = [
             {
@@ -186,6 +215,75 @@ class JsonSyncTests(unittest.IsolatedAsyncioTestCase):
             media = mock_send.await_args.args[1]
             self.assertTrue(media[0].has_spoiler)
             self.assertIsNone(media[1].has_spoiler)
+
+    async def test_send_json_media_group_adds_external_header_to_first_captioned_visual_item(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            photos_dir = Path(temp_dir) / "photos"
+            photos_dir.mkdir()
+            for name in ["a.jpg", "b.jpg", "c.jpg"]:
+                (photos_dir / name).write_bytes(b"jpg")
+
+            group = [
+                {
+                    "id": 1,
+                    "type": "message",
+                    "date_unixtime": "1",
+                    "photo": "photos/a.jpg",
+                    "forwarded_from": "test_channel",
+                    "forwarded_from_id": "channel3717669322",
+                    "forwarded_from_message_id": "888",
+                    "text": "",
+                },
+                {
+                    "id": 2,
+                    "type": "message",
+                    "date_unixtime": "2",
+                    "photo": "photos/b.jpg",
+                    "forwarded_from": "test_channel",
+                    "forwarded_from_id": "channel3717669322",
+                    "forwarded_from_message_id": "888",
+                    "text": "第二张说明",
+                },
+                {
+                    "id": 3,
+                    "type": "message",
+                    "date_unixtime": "3",
+                    "photo": "photos/c.jpg",
+                    "forwarded_from": "test_channel",
+                    "forwarded_from_id": "channel3717669322",
+                    "forwarded_from_message_id": "888",
+                    "text": "第三张说明",
+                },
+            ]
+
+            mock_send = AsyncMock(return_value=[FakeSentMessage(1001), FakeSentMessage(1002), FakeSentMessage(1003)])
+            with patch("sync_worker.json_import.process.update_state_and_check_skip", AsyncMock(return_value=False)), \
+                 patch("sync_worker.json_import.process.resolve_reply_target", AsyncMock(return_value=None)), \
+                 patch("sync_worker.json_import.process.rewrite_message_links", AsyncMock(side_effect=lambda text, *_: (text, 0))), \
+                 patch("sync_worker.json_import.process.record_success", AsyncMock()), \
+                 patch("sync_worker.json_import.process.db.add_msg_log", AsyncMock()), \
+                 patch("sync_worker.json_import.process.bot_engine.aiogram_bot") as mock_bot:
+                mock_bot.send_media_group = mock_send
+
+                await json_sync.send_json_media_group(
+                    group,
+                    -100456,
+                    temp_dir,
+                    0,
+                    False,
+                    {},
+                    "bot",
+                    True,
+                    False,
+                    True,
+                )
+
+            media = mock_send.await_args.args[1]
+            self.assertEqual(media[0].caption, "")
+            self.assertIn("#转发自", media[1].caption or "")
+            self.assertIn("第二张说明", media[1].caption or "")
+            self.assertNotIn("#转发自", media[2].caption or "")
+            self.assertIn("第三张说明", media[2].caption or "")
 
     async def test_process_json_sync_respects_type_filter(self):
         with tempfile.TemporaryDirectory() as temp_dir:
