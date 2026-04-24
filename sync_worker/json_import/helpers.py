@@ -87,11 +87,21 @@ def _is_request_entity_too_large(exc: Exception) -> bool:
     return "request entity too large" in str(exc).lower()
 
 
+def _is_topics_parse_error(exc: Exception) -> bool:
+    return "topics" in str(exc).lower() and "messages.__init__" in str(exc).lower()
+
+
 def _json_should_fallback_to_user(sender: str, clone_fallback_to_user: bool) -> bool:
     return sender == "bot" and bool(clone_fallback_to_user)
 
 
-async def _execute_with_retry(coro_factory, *, action_label: str, max_attempts: int = 3):
+async def _execute_with_retry(
+    coro_factory,
+    *,
+    action_label: str,
+    max_attempts: int = 3,
+    retry_unknown_errors: bool = True,
+):
     attempt = 0
     while True:
         attempt += 1
@@ -105,6 +115,8 @@ async def _execute_with_retry(coro_factory, *, action_label: str, max_attempts: 
                 await db.add_msg_log("JSON_RETRY", f"{action_label} | 遇到频控，等待 {retry_after + 1} 秒后重试")
                 await asyncio.sleep(retry_after + 1)
                 continue
+            if not retry_unknown_errors:
+                raise
             if attempt >= max_attempts:
                 raise
             await asyncio.sleep(2)

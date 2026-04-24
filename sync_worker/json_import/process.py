@@ -41,6 +41,7 @@ from .helpers import (
     UploadProgressTracker,
     _format_media_label,
     _is_request_entity_too_large,
+    _is_topics_parse_error,
     _json_should_fallback_to_user,
     _parse_retry_after_seconds,
     _select_json_upload_target,
@@ -112,10 +113,20 @@ async def _send_json_group_via_user(group, target_id, rewritten_captions, file_e
         f"上传媒体组: {len(file_entries)} 项",
         total_bytes=total_bytes,
     )
-    return await _execute_with_retry(
-        lambda: app.send_media_group(**kwargs),
-        action_label=f"媒体组 -> 辅助账号重传 [{len(file_entries)} 项]",
-    )
+    try:
+        return await _execute_with_retry(
+            lambda: app.send_media_group(**kwargs),
+            action_label=f"媒体组 -> 辅助账号重传 [{len(file_entries)} 项]",
+            retry_unknown_errors=False,
+        )
+    except Exception as exc:
+        if _is_topics_parse_error(exc):
+            await db.add_msg_log(
+                "JSON_TOPICS_COMPAT",
+                f"组首消息ID:{int(group[0].get('id') or 0)} | 辅助账号发送后返回 topics 解析异常，已停止重试避免重复发送",
+            )
+            return [type("PyroSentFallback", (), {"id": 0})() for _ in group]
+        raise
 
 async def send_json_media_group(
     group,

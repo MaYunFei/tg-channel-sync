@@ -86,6 +86,22 @@ def _add_quote_kwargs(kwargs: dict, quote_data, reply_to_id):
     return kwargs
 
 
+async def _safe_get_messages(app, source_id, msg_ids):
+    try:
+        return await app.get_messages(source_id, msg_ids)
+    except Exception as exc:
+        if "topics" not in str(exc).lower():
+            raise
+    result = []
+    for msg_id in msg_ids:
+        try:
+            msg = await app.get_messages(source_id, msg_id)
+        except Exception:
+            msg = None
+        result.append(msg)
+    return result
+
+
 async def _send_api_media(
     app,
     msg_type,
@@ -735,7 +751,7 @@ async def process_master_sync(
                 if sync_state["stop_requested"]:
                     break
                 try:
-                    msgs = await app.get_messages(source_id, list(range(chunk_start, min(chunk_start + 99, end_id) + 1)))
+                    msgs = await _safe_get_messages(source_id=source_id, app=app, msg_ids=list(range(chunk_start, min(chunk_start + 99, end_id) + 1)))
                 except Exception:
                     continue
 

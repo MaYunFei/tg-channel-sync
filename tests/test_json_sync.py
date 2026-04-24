@@ -21,6 +21,10 @@ class JsonSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(json_sync._is_request_entity_too_large(Exception("HTTP Client says - Request Entity Too Large")))
         self.assertFalse(json_sync._is_request_entity_too_large(Exception("Too Many Requests")))
 
+    def test_is_topics_parse_error(self):
+        self.assertTrue(json_sync._is_topics_parse_error(TypeError("Messages.__init__() missing 1 required keyword-only argument: 'topics'")))
+        self.assertFalse(json_sync._is_topics_parse_error(Exception("retry after 10")))
+
     async def test_send_json_single_via_user_raises_fatal_when_user_not_logged_in(self):
         with patch("sync_worker.json_import.process.bot_engine.pyro_user_app") as mock_app:
             mock_app.is_initialized = False
@@ -284,6 +288,50 @@ class JsonSyncTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("第二张说明", media[1].caption or "")
             self.assertNotIn("#转发自", media[2].caption or "")
             self.assertIn("第三张说明", media[2].caption or "")
+
+    async def test_send_json_media_group_user_topics_error_does_not_retry(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            photos_dir = Path(temp_dir) / "photos"
+            photos_dir.mkdir()
+            for name in ["a.jpg", "b.jpg"]:
+                (photos_dir / name).write_bytes(b"jpg")
+
+            group = [
+                {
+                    "id": 1,
+                    "type": "message",
+                    "date_unixtime": "1",
+                    "photo": "photos/a.jpg",
+                    "text": "第一张",
+                },
+                {
+                    "id": 2,
+                    "type": "message",
+                    "date_unixtime": "2",
+                    "photo": "photos/b.jpg",
+                    "text": "",
+                },
+            ]
+
+            mock_send = AsyncMock(side_effect=TypeError("Messages.__init__() missing 1 required keyword-only argument: 'topics'"))
+            with patch("sync_worker.json_import.process.update_state_and_check_skip", AsyncMock(return_value=False)), \
+                 patch("sync_worker.json_import.process.resolve_reply_target", AsyncMock(return_value=None)), \
+                 patch("sync_worker.json_import.process.rewrite_message_links", AsyncMock(side_effect=lambda text, *_: (text, 0))), \
+                 patch("sync_worker.json_import.process.record_success", AsyncMock()) as mock_record_success, \
+                 patch("sync_worker.json_import.process.db.add_msg_log", AsyncMock()) as mock_add_msg_log, \
+                 patch("sync_worker.json_import.process.bot_engine.pyro_user_app") as mock_app, \
+                 patch("sync_worker.json_import.process._select_json_upload_target", AsyncMock(return_value={"sender": "user", "client": object(), "label": "辅助账号"})):
+                mock_app.is_initialized = True
+                mock_app.send_media_group = mock_send
+
+                await json_sync.send_json_media_group(group, -100456, temp_dir, 0, False, {}, "bot", True)
+
+            self.assertEqual(mock_send.await_count, 1)
+            self.assertEqual(mock_record_success.await_count, 2)
+            self.assertIn(
+                ("JSON_TOPICS_COMPAT", "组首消息ID:1 | 辅助账号发送后返回 topics 解析异常，已停止重试避免重复发送"),
+                [call.args for call in mock_add_msg_log.await_args_list],
+            )
 
     async def test_process_json_sync_respects_type_filter(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -191,6 +191,26 @@ class SyncServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("77_", path_a)
         self.assertIn("78_", path_b)
 
+    async def test_safe_get_messages_falls_back_when_topics_parse_breaks_batch(self):
+        msg1 = type("Msg", (), {"id": 1, "empty": False})()
+        msg2 = type("Msg", (), {"id": 2, "empty": False})()
+
+        class FakeApp:
+            def __init__(self):
+                self.calls = []
+
+            async def get_messages(self, chat_id, ids):
+                self.calls.append((chat_id, ids))
+                if isinstance(ids, list):
+                    raise TypeError("Messages.__init__() missing 1 required keyword-only argument: 'topics'")
+                return {1: msg1, 2: msg2}.get(ids)
+
+        app = FakeApp()
+        result = await history._safe_get_messages(app, -100123, [1, 2])
+
+        self.assertEqual(result, [msg1, msg2])
+        self.assertEqual(app.calls, [(-100123, [1, 2]), (-100123, 1), (-100123, 2)])
+
     async def test_process_master_sync_logs_completion(self):
         with patch("sync_worker.clone.process.db.get_all_settings", AsyncMock(return_value={})), \
              patch("sync_worker.clone.process.resolve_chat_id", AsyncMock(return_value=-100456)), \
