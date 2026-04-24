@@ -14,7 +14,7 @@
 **Web页面**
 首页             |  设置
 :-------------------------:|:-------------------------:
-![Web 页面预览 1](https://github.com/user-attachments/assets/32ef11ae-2e8d-4228-ab7f-ac32ca46db14 "Web 页面预览 1") |  ![Web 页面预览 2](https://github.com/user-attachments/assets/f7dd89aa-742e-4002-a566-2271799044cc "Web 页面预览 2")
+<img width="1696" height="1904" alt="image" src="https://github.com/user-attachments/assets/60f20743-9955-4a63-9e23-b133c30a6870" /> |  ![Web 页面预览 2](https://github.com/user-attachments/assets/f7dd89aa-742e-4002-a566-2271799044cc "Web 页面预览 2")
 
 
 
