@@ -1,5 +1,5 @@
 ﻿const { createApp } = Vue;
-const { AppCard, ToastBanner, LogPanel, MappingOptionBadges, EmptyState } = window.TgcsUi;
+const { AppCard, ToastBanner, LogPanel, MappingOptionBadges, EmptyState, SenderIdentityOptions } = window.TgcsUi;
 const HELP_LINK = "https://github.com/RRHTY/tg-channel-sync/issues/2";
 
 const BotApiHint = {
@@ -20,7 +20,7 @@ const StatusOverview = {
 
 const ChannelMapping = {
   props:["mappings"],
-  components:{ AppCard, MappingOptionBadges, EmptyState },
+  components:{ AppCard, MappingOptionBadges, EmptyState, SenderIdentityOptions },
   data(){ return { source:"", target:"", realtime_sender:"bot", realtime_fallback_to_user:true, realtime_hash_perturb:false }; },
   computed:{
     mappingCount(){ return (this.mappings && this.mappings.mappings ? this.mappings.mappings.length : 0); }
@@ -44,18 +44,16 @@ const ChannelMapping = {
       this.target = "";
     }
   },
-  template:`<app-card><div class="mb-4 flex items-start justify-between gap-3"><div><h2 class="text-lg font-semibold mb-1">频道映射</h2><p class="text-xs text-gray-500">实时同步现已支持多对多映射。</p></div><span class="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-600">共 {{ mappingCount }} 条</span></div><div class="space-y-3"><div class="flex gap-2"><input v-model="source" type="text" placeholder="源频道 ID / URL" class="input-box"><input v-model="target" type="text" placeholder="目标频道 ID / URL" class="input-box"></div><div class="rounded border bg-white p-3 text-sm space-y-3"><b>实时同步</b><div><label class="mr-4"><input type="radio" v-model="realtime_sender" value="bot" class="mr-1">机器人</label><label><input type="radio" v-model="realtime_sender" value="user" class="mr-1">辅助账号</label></div><label v-if="realtime_sender === 'bot'" class="flex items-center gap-2"><input type="checkbox" v-model="realtime_fallback_to_user">Bot 上传失败时回退辅助账号重传</label><label class="flex items-center gap-2"><input type="checkbox" v-model="realtime_hash_perturb">重置图片/视频指纹</label></div><button @click="saveRule" class="btn-primary">保存规则</button></div><div class="mapping-scroll mt-4 space-y-3 text-sm"><div v-for="group in mappings.grouped_mappings || []" :key="group.target_id" class="rounded border bg-gray-50 p-3"><div class="mb-2 flex items-center justify-between"><span class="text-xs font-semibold text-gray-500">目标频道</span><span class="font-mono text-gray-800">{{ group.target_id }}</span></div><div class="space-y-2"><div v-for="item in group.sources" :key="item.source_id" class="flex items-center justify-between rounded bg-white px-3 py-2 group"><div class="min-w-0"><div class="flex items-center gap-2 font-mono"><span class="text-xs text-gray-400">源</span><span>{{ item.source_id }}</span></div><mapping-option-badges class="mt-1" :item="item"></mapping-option-badges></div><button @click="$emit('del', item.source_id, group.target_id)" class="text-red-500 opacity-0 group-hover:opacity-100 px-2">删除</button></div></div></div><empty-state v-if="!(mappings.grouped_mappings || []).length" text="暂无映射规则"></empty-state></div></app-card>`
+  template:`<app-card><div class="mb-4 flex items-start justify-between gap-3"><div><h2 class="text-lg font-semibold mb-1">频道映射</h2><p class="text-xs text-gray-500">实时同步现已支持多对多映射。</p></div><span class="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-600">共 {{ mappingCount }} 条</span></div><div class="space-y-3"><div class="flex gap-2"><input v-model="source" type="text" placeholder="源频道 ID / URL" class="input-box"><input v-model="target" type="text" placeholder="目标频道 ID / URL" class="input-box"></div><sender-identity-options :sender="realtime_sender" :fallback-value="realtime_fallback_to_user" :hash-value="realtime_hash_perturb" :show-hash-option="true" @update:sender="realtime_sender = $event" @update:fallback="realtime_fallback_to_user = $event" @update:hash="realtime_hash_perturb = $event"></sender-identity-options><button @click="saveRule" class="btn-primary">保存规则</button></div><div class="mapping-scroll mt-4 space-y-3 text-sm"><div v-for="group in mappings.grouped_mappings || []" :key="group.target_id" class="rounded border bg-gray-50 p-3"><div class="mb-2 flex items-center justify-between"><span class="text-xs font-semibold text-gray-500">目标频道</span><span class="font-mono text-gray-800">{{ group.target_id }}</span></div><div class="space-y-2"><div v-for="item in group.sources" :key="item.source_id" class="flex items-center justify-between rounded bg-white px-3 py-2 group"><div class="min-w-0"><div class="flex items-center gap-2 font-mono"><span class="text-xs text-gray-400">源</span><span>{{ item.source_id }}</span></div><mapping-option-badges class="mt-1" :item="item"></mapping-option-badges></div><button @click="$emit('del', item.source_id, group.target_id)" class="text-red-500 opacity-0 group-hover:opacity-100 px-2">删除</button></div></div></div><empty-state v-if="!(mappings.grouped_mappings || []).length" text="暂无映射规则"></empty-state></div></app-card>`
 };
 const SyncPanel = {
+  components:{ SenderIdentityOptions },
   props:["status","form","stopping"],
   computed:{
     supportsSenderOptions(){ return this.form.mode === "json" || this.form.mode === "clone"; },
-    supportsHashPerturb(){ return this.form.mode === "json" || this.form.mode === "clone"; },
-    fallbackTitle(){ return this.form.mode === "json" ? "Bot 发送失败时回退辅助账号继续发送" : "Bot 上传失败时回退辅助账号重传"; },
-    fallbackDesc(){ return this.form.mode === "json" ? "仅对 JSON 导入的发送阶段生效。开启后，Bot 限流、体积限制或可由辅助账号解决的发送失败，会自动切换为辅助账号继续发送。" : "仅对下载重传的上传阶段生效。开启后，Bot 限流、体积限制或可由辅助账号解决的上传失败，会自动切换为辅助账号继续发送。"; },
-    hashPerturbDesc(){ return this.form.mode === "json" ? "会复制图片/视频到临时目录后追加少量随机字节，不会改动原始导出文件，仅用于改变基础哈希特征。" : "会在文件尾部追加少量随机字节，速度快、零额外依赖，仅用于改变基础哈希特征。"; }
+    supportsHashPerturb(){ return this.form.mode === "json" || this.form.mode === "clone"; }
   },
-  template:`<div class="card"><h2 class="text-lg font-semibold mb-1">历史同步</h2><p class="text-xs text-gray-500 mb-4">批量同步指定范围内的历史消息到目标频道。</p><div class="mb-6 min-h-[104px] rounded bg-white p-4 shadow-sm transition-all"><template v-if="status.is_syncing"><div class="flex justify-between text-sm mb-1"><span class="font-medium text-blue-700">运行中 · {{ status.mode }}</span><span>{{ status.current }} / {{ status.total }}</span></div><div class="w-full bg-gray-200 rounded-full h-2 mb-3"><div class="bg-blue-600 h-2 rounded-full transition-all" :style="{ width: (status.total > 0 ? status.current / status.total * 100 : 0) + '%' }"></div></div><div class="text-xs text-gray-500"><p>跳过: {{ status.skipped }}</p><p class="whitespace-pre-line break-all text-blue-500 font-bold mt-1">{{ status.current_text }}</p></div></template><div v-else class="flex h-full min-h-[72px] items-center text-xs text-gray-400">任务开始后会在这里显示运行进度。</div></div><div class="space-y-4" :class="{ 'opacity-50 pointer-events-none': status.is_syncing }"><div v-if="form.mode !== 'json'" class="flex gap-2"><input v-model="form.source_id" placeholder="源频道 ID / URL" class="input-box"><input v-model="form.target_id" placeholder="目标频道 ID / URL" class="input-box"></div><div v-else class="space-y-2"><input v-model="form.target_id" placeholder="目标频道 ID / URL" class="input-box"><input v-model="form.json_path" placeholder="JSON 文件路径" class="input-box font-mono text-sm"><input v-model="form.json_source_username" placeholder="源频道：@username 或 https://t.me/username" class="input-box"><div><label class="text-xs">媒体组合并窗口（秒）</label><input v-model="form.json_media_group_window_seconds" type="number" min="1" step="1" class="input-box"></div></div><div class="flex bg-white rounded-lg border p-1"><button type="button" @click="form.mode='json'" :class="form.mode === 'json' ? 'bg-blue-100 text-blue-700 font-semibold' : 'text-gray-500'" class="flex-1 py-1 text-sm rounded">JSON 导入</button><button type="button" @click="form.mode='api'" :class="form.mode === 'api' ? 'bg-purple-100 text-purple-700 font-semibold' : 'text-gray-500'" class="flex-1 py-1 text-sm rounded">API 复制</button><button type="button" @click="form.mode='clone'" :class="form.mode === 'clone' ? 'bg-emerald-100 text-emerald-700 font-semibold' : 'text-gray-500'" class="flex-1 py-1 text-sm rounded">下载重传</button></div><div class="text-xs text-gray-500 -mt-2 px-1 space-y-1"><template v-if="form.mode === 'json'"><p>根据导出目录中的 result.json 和同目录媒体文件自动发送到目标频道。</p><p>仅支持普通回复恢复；如需改写 t.me/源频道/消息ID 链接，可填写 @用户名 或 t.me 链接。</p><p>无显式媒体组标记时，会按这个秒数窗口尝试合并连续图片/视频消息。</p></template><p v-else-if="form.mode === 'api'">通过 API 直接复制消息，速度更快。</p><p v-else-if="form.mode === 'clone'">通过 API 下载后重新上传，适合需要重新上传的场景。</p></div><div v-if="supportsSenderOptions" class="bg-white p-3 rounded border text-sm"><b>发送身份</b><label><input type="radio" v-model="form.sender" value="bot" class="ml-2 mr-1">机器人</label><label><input type="radio" v-model="form.sender" value="user" class="ml-4 mr-1">辅助账号</label><label v-if="form.sender === 'bot'" class="mt-3 flex items-start gap-2"><input type="checkbox" v-model="form.clone_fallback_to_user" true-value="1" false-value="0" class="mt-0.5"><span><b>{{ fallbackTitle }}</b><span class="block text-xs text-gray-600">{{ fallbackDesc }}</span></span></label><label v-if="supportsHashPerturb" class="mt-3 flex items-start gap-2"><input type="checkbox" v-model="form.hash_perturb" true-value="1" false-value="0" class="mt-0.5"><span><b>重置图片/视频指纹</b><span class="block text-xs text-gray-600">{{ hashPerturbDesc }}</span></span></label></div><div v-if="form.mode === 'api' || form.mode === 'clone'" class="flex gap-2"><input v-model="form.start_id" type="number" placeholder="起始 ID" class="input-box"><input v-model="form.end_id" type="number" placeholder="结束 ID" class="input-box"></div><div><label class="text-xs">单条处理延时（秒）<span class="text-gray-400">，最小 0.5</span></label><input v-model="form.delay" type="number" step="0.5" min="0.5" class="input-box"></div><label class="flex items-start gap-2 text-sm bg-amber-50 border border-amber-200 rounded p-3"><input type="checkbox" v-model="form.force_send" true-value="1" false-value="0" class="mt-0.5"><span><b>强制发送</b><span class="block text-xs text-gray-600">跳过重复和断点检查，直接发送当前选中的消息。</span></span></label></div><button v-if="!status.is_syncing" type="button" @click="$emit('start', form)" class="btn-primary mt-4 bg-gray-800 hover:bg-gray-900">启动 {{ form.mode.toUpperCase() }} 任务</button><button v-else-if="stopping" type="button" class="btn-primary mt-4 bg-red-600 cursor-not-allowed">中断中<span class="dot-anim"></span></button><button v-else type="button" @click="$emit('stop')" class="btn-primary mt-4 bg-red-600 hover:bg-red-700">中断任务</button></div>`
+  template:`<div class="card"><h2 class="text-lg font-semibold mb-1">历史同步</h2><p class="text-xs text-gray-500 mb-4">批量同步指定范围内的历史消息到目标频道。</p><div class="mb-6 min-h-[104px] rounded bg-white p-4 shadow-sm transition-all"><template v-if="status.is_syncing"><div class="flex justify-between text-sm mb-1"><span class="font-medium text-blue-700">运行中 · {{ status.mode }}</span><span>{{ status.current }} / {{ status.total }}</span></div><div class="w-full bg-gray-200 rounded-full h-2 mb-3"><div class="bg-blue-600 h-2 rounded-full transition-all" :style="{ width: (status.total > 0 ? status.current / status.total * 100 : 0) + '%' }"></div></div><div class="text-xs text-gray-500"><p>跳过: {{ status.skipped }}</p><p class="whitespace-pre-line break-all text-blue-500 font-bold mt-1">{{ status.current_text }}</p></div></template><div v-else class="flex h-full min-h-[72px] items-center text-xs text-gray-400">任务开始后会在这里显示运行进度。</div></div><div class="space-y-4" :class="{ 'opacity-50 pointer-events-none': status.is_syncing }"><div v-if="form.mode !== 'json'" class="flex gap-2"><input v-model="form.source_id" placeholder="源频道 ID / URL" class="input-box"><input v-model="form.target_id" placeholder="目标频道 ID / URL" class="input-box"></div><div v-else class="space-y-2"><input v-model="form.target_id" placeholder="目标频道 ID / URL" class="input-box"><input v-model="form.json_path" placeholder="JSON 文件路径" class="input-box font-mono text-sm"><input v-model="form.json_source_username" placeholder="源频道：@username 或 https://t.me/username" class="input-box"><div><label class="text-xs">媒体组合并窗口（秒）</label><input v-model="form.json_media_group_window_seconds" type="number" min="1" step="1" class="input-box"></div></div><div class="flex bg-white rounded-lg border p-1"><button type="button" @click="form.mode='json'" :class="form.mode === 'json' ? 'bg-blue-100 text-blue-700 font-semibold' : 'text-gray-500'" class="flex-1 py-1 text-sm rounded">JSON 导入</button><button type="button" @click="form.mode='api'" :class="form.mode === 'api' ? 'bg-purple-100 text-purple-700 font-semibold' : 'text-gray-500'" class="flex-1 py-1 text-sm rounded">API 复制</button><button type="button" @click="form.mode='clone'" :class="form.mode === 'clone' ? 'bg-emerald-100 text-emerald-700 font-semibold' : 'text-gray-500'" class="flex-1 py-1 text-sm rounded">下载重传</button></div><div class="text-xs text-gray-500 -mt-2 px-1 space-y-1"><template v-if="form.mode === 'json'"><p>根据导出目录中的 result.json 和同目录媒体文件自动发送到目标频道。</p><p>仅支持普通回复恢复；如需改写 t.me/源频道/消息ID 链接，可填写 @用户名 或 t.me 链接。</p><p>无显式媒体组标记时，会按这个秒数窗口尝试合并连续图片/视频消息。</p></template><p v-else-if="form.mode === 'api'">通过 API 直接复制消息，速度更快。</p><p v-else-if="form.mode === 'clone'">通过 API 下载后重新上传，适合需要重新上传的场景。</p></div><sender-identity-options v-if="supportsSenderOptions" :sender="form.sender" :fallback-value="form.clone_fallback_to_user" :show-hash-option="supportsHashPerturb" :hash-value="form.hash_perturb" fallback-true-value="1" fallback-false-value="0" hash-true-value="1" hash-false-value="0" @update:sender="form.sender = $event" @update:fallback="form.clone_fallback_to_user = $event" @update:hash="form.hash_perturb = $event"></sender-identity-options><div v-if="form.mode === 'api' || form.mode === 'clone'" class="flex gap-2"><input v-model="form.start_id" type="number" placeholder="起始 ID" class="input-box"><input v-model="form.end_id" type="number" placeholder="结束 ID" class="input-box"></div><div><label class="text-xs">单条处理延时（秒）<span class="text-gray-400">，最小 0.5</span></label><input v-model="form.delay" type="number" step="0.5" min="0.5" class="input-box"></div><label class="flex items-start gap-2 text-sm bg-amber-50 border border-amber-200 rounded p-3"><input type="checkbox" v-model="form.force_send" true-value="1" false-value="0" class="mt-0.5"><span><b>强制发送</b><span class="block text-xs text-gray-600">跳过重复和断点检查，直接发送当前选中的消息。</span></span></label></div><button v-if="!status.is_syncing" type="button" @click="$emit('start', form)" class="btn-primary mt-4 bg-gray-800 hover:bg-gray-900">启动 {{ form.mode.toUpperCase() }} 任务</button><button v-else-if="stopping" type="button" class="btn-primary mt-4 bg-red-600 cursor-not-allowed">中断中<span class="dot-anim"></span></button><button v-else type="button" @click="$emit('stop')" class="btn-primary mt-4 bg-red-600 hover:bg-red-700">中断任务</button></div>`
 };
 
 const LogViewer = {
@@ -85,112 +83,21 @@ const SettingsPanel = {
 createApp({
   components:{ SetupWizard, StatusOverview, ChannelMapping, SyncPanel, LogViewer, SettingsPanel, GlobalFilters, ToastBanner },
   data(){ return { currentView:"home", appInfo:{ bot:{}, user:{} }, mappings:{ mappings:[], grouped_mappings:[] }, filterRules:[], newFilter:{ rule_type:"replace", pattern:"", replacement:"", is_case_sensitive:0 }, settings:{ sync_text:"1", sync_photo:"1", sync_video:"1", sync_document:"1", sync_audio:"1", sync_voice:"1", sync_sticker:"1", sync_gif:"1" }, configForm:{ telegram:{ bot_token:"", extra_bot_tokens:"", api_id:"", api_hash:"", bot_api_base_url:"" }, proxy:{ enabled:false, host:"127.0.0.1", port:7897, username:"", password:"" }, server:{ host:"127.0.0.1", port:8011, auto_open_browser:true }, sync:{ default_delay:5, force_send:false, add_external_source_header:false, prefer_local_bot_api:true, bot_upload_max_mb:50, bot_rate_limit_enabled:false, bot_rate_limit_gb:10, bot_rate_limit_window_hours:24, bot_rate_limit_cooldown_minutes:300, realtime_sender:"bot", realtime_fallback_to_user:true, realtime_hash_perturb:false }, app:{ portable_mode:true, log_level:"INFO" } }, setupStatus:{ needs_setup:false }, syncForm:{ mode:"api", sender:"bot", source_id:"", target_id:"", start_id:"", end_id:"", json_path:"", json_source_username:"", json_media_group_window_seconds:3, delay:5, force_send:"0", hash_perturb:"0", clone_fallback_to_user:"1" }, syncStatus:{ is_syncing:false, mode:"", total:0, current:0, skipped:0 }, userAuth:{ status:"idle", status_label:"未登录", awaiting_code:false, awaiting_password:false, phone_number:"", password_hint:"", send_code_cooldown:0 }, versionInfo:{ status:"idle", current_version:"", latest_version:"", up_to_date:false, url:"https://github.com/RRHTY/tg-channel-sync" }, sendCodeCooldown:0, sendCodeTimer:null, authSubmitting:false, stopping:false, serverAction:"", restartPolling:null, sysLogs:[], msgLogs:[], sseConnection:null, configSaving:false, notice:{ message:"", type:"info" }, noticeTimer:null }; },
-  async mounted(){ await this.bootstrap(); this.setupSSE(); this.startSendCodeTimer(); this.loadVersionInfo(); },
-  methods:{
-    async bootstrap(){ await Promise.all([this.loadConfig(), this.loadSetupStatus(), this.fetchAppInfo(), this.loadMappings(), this.loadFilters(), this.loadSettings(), this.loadUserAuthStatus(), this.loadSystemLogs(), this.loadMessageLogs()]); this.syncForm.delay = this.configForm.sync.default_delay || 5; this.syncForm.force_send = this.configForm.sync.force_send ? "1" : "0"; this.syncForm.json_media_group_window_seconds = Number(this.syncForm.json_media_group_window_seconds || 3); this.currentView = this.setupStatus.needs_setup ? "setup" : "home"; },
-    navButtonClass(view){ return this.currentView === view ? "bg-gray-900 text-white" : "bg-gray-100 text-gray-700 hover:bg-gray-200"; },
-    showToast(msg, type = "info"){ if(!msg) return; this.notice = { message: msg, type }; if(this.noticeTimer) clearTimeout(this.noticeTimer); this.noticeTimer = setTimeout(() => { this.notice = { message: "", type: "info" }; this.noticeTimer = null; }, 4000); },
-    pushSystemNotice(message, level = "WARNING"){ const time = new Date().toLocaleString("zh-CN", { hour12:false }).replace(/\//g, "-"); this.sysLogs = [...this.sysLogs, { id:`local-${Date.now()}`, time, level, msg:message }].slice(-100); this.$nextTick(()=>this.scrollLogsToBottom({ sys:true, msg:false })); },
-    showAppError(message){ this.showToast(message, "error"); this.pushSystemNotice(message, "WARNING"); },
-    openSettings(){ this.currentView = "settings"; },
-    normalizeConfigForm(){ if(!this.configForm.telegram.api_id) this.configForm.telegram.api_id = ""; this.configForm.telegram.extra_bot_tokens = Array.isArray(this.configForm.telegram.extra_bot_tokens) ? this.configForm.telegram.extra_bot_tokens.join("\n") : (this.configForm.telegram.extra_bot_tokens || ""); },
-    updateUserAuthLabel(){ const map={ idle:"未登录", awaiting_code:"等待验证码", awaiting_password:"等待两步验证", authorized:"已登录" }; this.userAuth.status_label = map[this.userAuth.status] || this.userAuth.status || "未登录"; this.sendCodeCooldown = Math.max(this.sendCodeCooldown || 0, this.userAuth.send_code_cooldown || 0); },
-    startSendCodeTimer(){ if(this.sendCodeTimer) clearInterval(this.sendCodeTimer); this.sendCodeTimer = setInterval(() => { if(this.sendCodeCooldown > 0) this.sendCodeCooldown -= 1; }, 1000); },
-    async loadSetupStatus(){ this.setupStatus = await (await fetch("/api/setup/status")).json(); },
-    async loadConfig(){ this.configForm = await (await fetch("/api/config")).json(); this.normalizeConfigForm(); },
-    async loadUserAuthStatus(){ this.userAuth = await (await fetch("/api/user_auth/status")).json(); this.sendCodeCooldown = this.userAuth.send_code_cooldown || 0; this.updateUserAuthLabel(); },
-    async loadVersionInfo(){ try { this.versionInfo = await (await fetch("/api/version", { cache:"no-store" })).json(); } catch(_) { this.versionInfo = { status:"error", current_version:"unknown", latest_version:"", up_to_date:false, url:"https://github.com/RRHTY/tg-channel-sync" }; } },
-    async saveConfig(showToast = true){ this.configSaving = true; try { const payload = JSON.parse(JSON.stringify(this.configForm)); payload.telegram.api_id = payload.telegram.api_id ? Number(payload.telegram.api_id) : 0; payload.telegram.extra_bot_tokens = (payload.telegram.extra_bot_tokens || "").split(/\r?\n|,/).map(v => v.trim()).filter(Boolean); const res = await (await fetch("/api/config", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(payload) })).json(); if(showToast) this.showToast(res.message); this.configForm = res.config; this.normalizeConfigForm(); await this.loadSetupStatus(); await this.loadUserAuthStatus(); return res; } finally { this.configSaving = false; } },
-    async saveSetup(shouldRestart){ if(!this.configForm.telegram.bot_token){ this.showToast("BOT_TOKEN 为必填项"); return; } await this.saveConfig(!shouldRestart); this.currentView = "home"; if(shouldRestart) await this.restartServer(); },
-    async saveSettingsPage(shouldRestart){ await this.saveConfig(true); if(shouldRestart) await this.restartServer(); }, async saveAndRestart(){ await this.saveConfig(false); await this.restartServer(); },
-    waitForServerReady(){ if(this.restartPolling) clearInterval(this.restartPolling); this.restartPolling = setInterval(async()=>{ try { const res = await fetch("/api/app_info", { cache:"no-store" }); if(!res.ok) return; clearInterval(this.restartPolling); this.restartPolling = null; window.location.reload(); } catch(_){} }, 1000); },
-    isPanelNearBottom(panel, threshold = 24){
-      if(!panel) return true;
-      return panel.scrollHeight - panel.scrollTop - panel.clientHeight <= threshold;
-    },
-    scrollLogsToBottom(options = {}){
-      const { sys = true, msg = true } = options;
-      const sysPanel = document.getElementById("sys-log-panel");
-      const msgPanel = document.getElementById("msg-log-panel");
-      if(sys && sysPanel) sysPanel.scrollTop = sysPanel.scrollHeight;
-      if(msg && msgPanel) msgPanel.scrollTop = msgPanel.scrollHeight;
-    },
-    setupSSE(){ this.sseConnection = new EventSource("/api/stream"); this.sseConnection.onmessage = (event)=>{ const data = JSON.parse(event.data); const sysPanel = document.getElementById("sys-log-panel"); const msgPanel = document.getElementById("msg-log-panel"); const shouldFollowSys = this.isPanelNearBottom(sysPanel); const shouldFollowMsg = this.isPanelNearBottom(msgPanel); if(data.status){ if(this.stopping && !data.status.is_syncing) this.stopping = false; this.syncStatus = data.status; } if(data.app_info) this.appInfo = data.app_info; if(data.sys_logs) this.sysLogs = [...this.sysLogs, ...data.sys_logs].slice(-100); if(data.msg_logs) this.msgLogs = [...this.msgLogs, ...data.msg_logs].slice(-100); this.$nextTick(()=>this.scrollLogsToBottom({ sys: shouldFollowSys, msg: shouldFollowMsg })); }; },
-    async fetchAppInfo(){ this.appInfo = await (await fetch("/api/app_info")).json(); },
-    async loadSystemLogs(){ this.sysLogs = await (await fetch("/api/logs/system")).json(); this.$nextTick(()=>this.scrollLogsToBottom({ sys: true, msg: false })); },
-    async loadMessageLogs(){ this.msgLogs = await (await fetch("/api/logs/message")).json(); this.$nextTick(()=>this.scrollLogsToBottom({ sys: false, msg: true })); },
-    async loadMappings(){ const result = await (await fetch("/api/mappings")).json(); this.mappings = { mappings: result.mappings || [], grouped_mappings: result.grouped_mappings || [] }; },
-    async loadFilters(){ this.filterRules = await (await fetch("/api/filter_rules")).json(); },
-    async loadSettings(){ const result = await (await fetch("/api/global_settings")).json(); Object.keys(this.settings).forEach((key)=>{ if(result[key] !== undefined) this.settings[key] = result[key]; }); },
-    async saveGlobalSettings(){ const form = new FormData(); Object.keys(this.settings).forEach((key)=>form.append(key, this.settings[key])); const res = await (await fetch("/api/global_settings", { method:"POST", body:form })).json(); if(res.status === "error") this.showAppError(`保存类型配置失败：${res.message}`); else this.showToast(res.message); },
-    appendLocalSystemLog(message, level = "WARNING"){ this.pushSystemNotice(message, level); },
-    async addMapping(source, target, options = {}){ try { const form = new FormData(); form.append("source_id", source); form.append("target_id", target); Object.keys(options).forEach((key)=>form.append(key, options[key])); const res = await (await fetch("/api/mappings", { method:"POST", body:form })).json(); if(res.status === "error"){ this.showAppError(`添加频道映射失败：${res.message}`); } else if(res.message){ this.showToast(res.message); } await this.loadMappings(); } catch(exc) { this.showAppError(`添加频道映射失败：${exc}`); } },
-    async deleteMapping(sourceId, targetId){ try { const suffix = targetId !== undefined ? `?target_id=${encodeURIComponent(targetId)}` : ""; const res = await (await fetch(`/api/mappings/${sourceId}${suffix}`, { method:"DELETE" })).json(); if(res.status === "error") this.showAppError(`删除频道映射失败：${res.message}`); else if(res.message) this.showToast(res.message); await this.loadMappings(); } catch(exc) { this.showAppError(`删除频道映射失败：${exc}`); } },
-    async clearSystemLogs(){ if(!window.confirm("确认清理系统日志吗？")) return; const res = await (await fetch("/api/logs/system", { method:"DELETE" })).json(); this.sysLogs = []; this.showToast(res.message); this.$nextTick(()=>this.scrollLogsToBottom()); },
-    async clearMessageLogs(){ if(!window.confirm("确认清理消息日志吗？")) return; const res = await (await fetch("/api/logs/message", { method:"DELETE" })).json(); this.msgLogs = []; this.showToast(res.message); this.$nextTick(()=>this.scrollLogsToBottom()); },
-    async addFilter(rule){ const form = new FormData(); Object.keys(rule).forEach((key)=>form.append(key, rule[key])); const res = await (await fetch("/api/filter_rules", { method:"POST", body:form })).json(); if(res.status === "error") this.showAppError(`添加过滤规则失败：${res.message}`); else if(res.message) this.showToast(res.message); this.loadFilters(); this.newFilter = { rule_type:"replace", pattern:"", replacement:"", is_case_sensitive:0 }; },
-    async deleteFilter(id){ await fetch(`/api/filter_rules/${id}`, { method:"DELETE" }); this.loadFilters(); },
-    async startSync(form){ const payload = new FormData(); Object.keys(form).forEach((key)=>payload.append(key, form[key] || (key.includes("id") ? "0" : ""))); const res = await (await fetch("/api/start_sync", { method:"POST", body:payload })).json(); if(res.status === "error") this.showAppError(`启动任务失败：${res.message}`); else if(res.message) this.showToast(res.message); },
-    async stopSync(){ this.stopping = true; await fetch("/api/stop_sync", { method:"POST" }); },
-    async restartServer(){ if(this.serverAction) return; if(!window.confirm("确认重启服务吗？")) return; this.serverAction = "restart"; const res = await (await fetch("/api/server/restart", { method:"POST" })).json(); this.showToast(res.message); if(this.sseConnection) this.sseConnection.close(); this.waitForServerReady(); },
-    async stopServer(){ if(this.serverAction) return; if(!window.confirm("确认关闭服务吗？")) return; this.serverAction = "stop"; const res = await (await fetch("/api/server/stop", { method:"POST" })).json(); this.showToast(res.message); if(this.sseConnection) this.sseConnection.close(); },
-    async sendUserCode(phoneNumber){
-      if(this.sendCodeCooldown > 0 || this.authSubmitting) return;
-      const normalizedPhone = String(phoneNumber || "").trim();
-      if(!normalizedPhone){
-        this.showAppError("发送验证码失败：手机号不能为空");
-        return;
-      }
-      const previousCooldown = this.sendCodeCooldown || 0;
-      this.userAuth = {
-        ...this.userAuth,
-        status: "awaiting_code",
-        awaiting_code: true,
-        phone_number: normalizedPhone,
-      };
-      this.updateUserAuthLabel();
-      this.sendCodeCooldown = Math.max(previousCooldown, 30);
-      this.authSubmitting = true;
-      try {
-        const response = await fetch("/api/user_auth/send_code", {
-          method:"POST",
-          headers:{ "Content-Type":"application/json" },
-          body: JSON.stringify({ phone_number: normalizedPhone }),
-        });
-        const res = await response.json();
-        this.showToast(res.message || "已发送请求", res.status === "error" ? "error" : "info");
-        if(res.status === "error"){
-          this.sendCodeCooldown = previousCooldown;
-        } else if(res.send_code_cooldown){
-          this.sendCodeCooldown = Math.max(this.sendCodeCooldown, Number(res.send_code_cooldown) || 0);
-        }
-        await this.loadUserAuthStatus();
-        await this.fetchAppInfo();
-      } catch(exc) {
-        this.sendCodeCooldown = previousCooldown;
-        this.showAppError(`发送验证码失败：${exc}`);
-        try {
-          await this.loadUserAuthStatus();
-          await this.fetchAppInfo();
-        } catch(_) {}
-      } finally {
-        this.authSubmitting = false;
-      }
-    },
-    async verifyUserCode(phoneCode){ this.authSubmitting = true; try { const res = await (await fetch("/api/user_auth/sign_in", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify({ phone_code: phoneCode }) })).json(); this.showToast(res.message || "已提交验证码", res.status === "error" ? "error" : "info"); await this.loadUserAuthStatus(); await this.fetchAppInfo(); } finally { this.authSubmitting = false; } },
-    async submitUserPassword(password){ this.authSubmitting = true; try { const res = await (await fetch("/api/user_auth/check_password", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify({ password }) })).json(); this.showToast(res.message || "已提交密码", res.status === "error" ? "error" : "info"); await this.loadUserAuthStatus(); await this.fetchAppInfo(); } finally { this.authSubmitting = false; } },
-    async cancelUserAuth(){ this.authSubmitting = true; try { const res = await (await fetch("/api/user_auth/cancel", { method:"POST" })).json(); this.showToast(res.message || "已取消登录", res.status === "error" ? "error" : "info"); await this.loadUserAuthStatus(); await this.fetchAppInfo(); } finally { this.authSubmitting = false; } },
-    async switchUserAccount(){
-      if (!window.confirm("确认切换辅助账号吗？\n当前账号会退出登录，并清除本地会话。")) return;
-      this.authSubmitting = true;
-      try {
-        const res = await (await fetch("/api/user_auth/switch_account", { method:"POST" })).json();
-        this.showToast(res.message || "已切换账号", res.status === "error" ? "error" : "info");
-        await this.loadUserAuthStatus();
-        await this.fetchAppInfo();
-      } finally {
-        this.authSubmitting = false;
-      }
+  async mounted(){
+    this.startSendCodeTimer();
+    try {
+      await this.bootstrap();
+      this.setupSSE();
+    } catch(error) {
+      this.showAppError(window.TgcsApi.getErrorMessage(error, "页面初始化失败"));
     }
-  }
+    this.loadVersionInfo();
+  },
+  beforeUnmount(){
+    if(this.sendCodeTimer) clearInterval(this.sendCodeTimer);
+    if(this.restartPolling) clearInterval(this.restartPolling);
+    if(this.noticeTimer) clearTimeout(this.noticeTimer);
+    if(this.sseConnection) this.sseConnection.close();
+  },
+  methods: window.TgcsAppMethods
 }).mount("#app");

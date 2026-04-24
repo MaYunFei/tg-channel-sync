@@ -41,7 +41,7 @@
 
 ## 部署与运行
 
- Windows x64系统推荐直接下载Release中已构建完毕的full版本，无需Python环境： [Release](https://github.com/RRHTY/tg-channel-sync/releases)
+ Windows x64系统推荐直接下载Release中已构建完毕的full版本，无需额外安装Python环境： [Release](https://github.com/RRHTY/tg-channel-sync/releases)
 
 -----
 
@@ -102,7 +102,7 @@
 
 4. 打包完成后，产物会输出到 `dist-portable/`，脚本只保留 zip 文件：
     - `tg-channel-sync-vX.Y.Z-windows-x64-portable.zip`：便携 exe 版，不包含 Python 环境，也不包含 `ffmpeg`
-    - `tg-channel-sync-vX.Y.Z-windows-x64-full.zip`：完整运行环境版，包含源码、Python 和 `venv` 中的全部依赖
+    - `tg-channel-sync-vX.Y.Z-windows-x64-full.zip`：完整运行环境版，包含源码、精简 Python 运行时和 `requirements.txt` 对应依赖
     - 根目录下临时生成的 `build/` 和 `dist/` 会在打包结束后自动清理
 
 5. 用户使用方式：
@@ -123,8 +123,9 @@
 构建说明：
 
 1. 默认构建出的 `portable` 与 `full` 包都不需要额外的媒体处理依赖
-2. “重置图片/视频指纹”采用纯 Python 的尾部追加随机字节方案，目标仅是改变基础哈希特征
-3. 该方案追求速度和零依赖，不保证适用于所有平台或更严格的媒体查重逻辑
+2. `full` 包不再复制整个开发 `venv`，而是内置一个精简运行时，以减少解压时的小文件数量
+3. “重置图片/视频指纹”采用纯 Python 的尾部追加随机字节方案，目标仅是改变基础哈希特征
+4. 该方案追求速度和零依赖，不保证适用于所有平台或更严格的媒体查重逻辑
 
 -----
 ## 功能矩阵

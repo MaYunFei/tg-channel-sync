@@ -32,6 +32,52 @@ const MappingOptionBadges = {
   </div>`,
 };
 
+const SenderIdentityOptions = {
+  props: [
+    "sender",
+    "fallbackValue",
+    "hashValue",
+    "showHashOption",
+    "fallbackTrueValue",
+    "fallbackFalseValue",
+    "hashTrueValue",
+    "hashFalseValue",
+  ],
+  emits: ["update:sender", "update:fallback", "update:hash"],
+  computed: {
+    fallbackChecked() {
+      return String(this.fallbackValue) === String(this.fallbackTrueValue ?? true);
+    },
+    hashChecked() {
+      return String(this.hashValue) === String(this.hashTrueValue ?? true);
+    },
+  },
+  methods: {
+    onSenderChange(event) {
+      this.$emit("update:sender", event.target.value);
+    },
+    onFallbackChange(event) {
+      this.$emit("update:fallback", event.target.checked ? (this.fallbackTrueValue ?? true) : (this.fallbackFalseValue ?? false));
+    },
+    onHashChange(event) {
+      this.$emit("update:hash", event.target.checked ? (this.hashTrueValue ?? true) : (this.hashFalseValue ?? false));
+    },
+  },
+  template: `<div class="bg-white p-3 rounded border text-sm space-y-3">
+    <div class="flex items-center gap-4">
+      <b>发送身份</b>
+      <label><input type="radio" :checked="sender === 'bot'" value="bot" class="ml-2 mr-1" @change="onSenderChange">机器人</label>
+      <label><input type="radio" :checked="sender === 'user'" value="user" class="ml-2 mr-1" @change="onSenderChange">辅助账号</label>
+    </div>
+    <label v-if="sender === 'bot'" class="flex items-center gap-2">
+      <input type="checkbox" :checked="fallbackChecked" @change="onFallbackChange">Bot 发送失败时回退辅助账号继续发送
+    </label>
+    <label v-if="showHashOption" class="flex items-center gap-2">
+      <input type="checkbox" :checked="hashChecked" @change="onHashChange">重置图片/视频指纹
+    </label>
+  </div>`,
+};
+
 const LogPanel = {
   components: { AppCard },
   props: ["title", "description", "logs", "kind", "panelId"],
@@ -81,6 +127,7 @@ window.TgcsUi = {
   ToastBanner,
   EmptyState,
   MappingOptionBadges,
+  SenderIdentityOptions,
   LogPanel,
 };
 })();
