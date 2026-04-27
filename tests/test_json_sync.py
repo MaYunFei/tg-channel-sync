@@ -518,6 +518,75 @@ class JsonSyncTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('href="https://t.me/c/123/456"', sent_text)
             self.assertIn('<pre><code class="language-Json">{&quot;a&quot;:1}</code></pre>', sent_text)
 
+    async def test_process_json_sync_counts_media_group_progress_by_message(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            photos_dir = Path(temp_dir) / "photos"
+            photos_dir.mkdir()
+            for name in ["1.jpg", "2.jpg", "3.jpg"]:
+                (photos_dir / name).write_bytes(b"jpg")
+
+            json_path = Path(temp_dir) / "result.json"
+            json_path.write_text(
+                json.dumps(
+                    {
+                        "messages": [
+                            {
+                                "id": 1,
+                                "type": "message",
+                                "photo": "photos/1.jpg",
+                                "date_unixtime": "100",
+                                "text": "第一张",
+                            },
+                            {
+                                "id": 2,
+                                "type": "message",
+                                "photo": "photos/2.jpg",
+                                "date_unixtime": "100",
+                                "text": "",
+                            },
+                            {
+                                "id": 3,
+                                "type": "message",
+                                "photo": "photos/3.jpg",
+                                "date_unixtime": "100",
+                                "text": "",
+                            },
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            mock_bot = type("FakeBot", (), {"send_media_group": AsyncMock(return_value=[FakeSentMessage(1001), FakeSentMessage(1002), FakeSentMessage(1003)])})()
+            original_current = json_sync.sync_state["current"]
+            original_total = json_sync.sync_state["total"]
+            original_stop = json_sync.sync_state["stop_requested"]
+            try:
+                json_sync.sync_state["current"] = 0
+                json_sync.sync_state["total"] = 0
+                json_sync.sync_state["stop_requested"] = False
+
+                with patch("sync_worker.json_import.process.resolve_chat_id", AsyncMock(return_value=-100456)), \
+                     patch("sync_worker.json_import.process.build_link_rewrite_context", AsyncMock(return_value={})), \
+                     patch("sync_worker.json_import.process.resolve_reply_target", AsyncMock(return_value=None)), \
+                     patch("sync_worker.json_import.process.rewrite_message_links", AsyncMock(side_effect=lambda text, *_: (text, 0))), \
+                     patch("sync_worker.json_import.process.record_success", AsyncMock()), \
+                     patch("sync_worker.json_import.process.bot_engine.note_upload_success", AsyncMock()), \
+                     patch("sync_worker.json_import.process._select_json_upload_target", AsyncMock(return_value={"sender": "bot", "client": mock_bot, "label": "Bot"})), \
+                     patch("sync_worker.json_import.process.db.get_all_settings", AsyncMock(return_value={"sync_photo": "1"})), \
+                     patch("sync_worker.json_import.process.db.apply_message_filters", AsyncMock(side_effect=lambda text, *_: (False, text))), \
+                     patch("sync_worker.json_import.process.db.add_msg_log", AsyncMock()), \
+                     patch("sync_worker.runtime.state.db.is_message_synced", AsyncMock(return_value=False)):
+                    await json_sync.process_json_sync("bot", "@target", str(json_path), 0, False)
+
+                self.assertEqual(json_sync.sync_state["total"], 3)
+                self.assertEqual(json_sync.sync_state["current"], 3)
+            finally:
+                json_sync.sync_state["current"] = original_current
+                json_sync.sync_state["total"] = original_total
+                json_sync.sync_state["stop_requested"] = original_stop
+
     async def test_prepare_json_media_path_preserves_original_file(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             original = Path(temp_dir) / "photo.jpg"

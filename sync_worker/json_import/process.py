@@ -353,6 +353,7 @@ async def process_json_sync(
                 include_external_source_header,
             )
             if result is not None:
+                sync_state["current"] += max(0, len(group) - 1)
                 await asyncio.sleep(safe_delay)
                 continue
         for msg in group:
