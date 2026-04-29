@@ -18,6 +18,7 @@ from app_config import get_config
 from app_paths import pyrogram_user_session_base
 from services.sync_services import (
     build_link_rewrite_context,
+    execute_with_network_retry,
     get_quote_payload,
     resolve_reply_for_forward,
     rewrite_message_links,
@@ -331,7 +332,11 @@ async def _download_realtime_media(message: Message, msg_type: str) -> str | Non
     if media_obj is None:
         return None
     target_path = _build_realtime_download_path(message, msg_type)
-    await aiogram_bot.download(media_obj, destination=target_path, timeout=3600)
+    await execute_with_network_retry(
+        lambda: aiogram_bot.download(media_obj, destination=target_path, timeout=3600),
+        action_label=f"实时下载媒体 {message.message_id}",
+        log_tag="REALTIME_NETWORK_RETRY",
+    )
     return target_path if os.path.exists(target_path) else None
 
 
@@ -340,15 +345,19 @@ async def _send_realtime_text_with_identity(target_id, text_html, reply_to_id, q
     client = aiogram_bot if sender == "bot" else pyro_user_app
     if sender == "user" and not getattr(client, "is_initialized", False):
         raise RuntimeError("实时同步使用辅助账号发送前，请先完成辅助账号登录")
-    sent = await dynamic_send(
-        client,
-        "text",
-        target_id,
-        None,
-        text_html,
-        "HTML" if sender == "bot" else ParseMode.HTML,
-        reply_to_message_id=reply_to_id,
-        quote_data=quote_data if reply_to_id else None,
+    sent = await execute_with_network_retry(
+        lambda: dynamic_send(
+            client,
+            "text",
+            target_id,
+            None,
+            text_html,
+            "HTML" if sender == "bot" else ParseMode.HTML,
+            reply_to_message_id=reply_to_id,
+            quote_data=quote_data if reply_to_id else None,
+        ),
+        action_label=f"实时文本发送 {target_id}",
+        log_tag="REALTIME_NETWORK_RETRY",
     )
     return sent.message_id if sender == "bot" else sent.id
 
@@ -374,16 +383,20 @@ async def _send_realtime_media_upload(source_id, target_id, message, msg_type, t
         file_label = format_upload_label(msg_type, file_path)
         tracker = UploadProgressTracker(f"实时上传 [{upload_target['label']}]", file_size)
         media_arg = ProgressFSInputFile(file_path, tracker, file_label) if actual_sender == "bot" else file_path
-        sent = await dynamic_send(
-            client,
-            msg_type,
-            target_id,
-            media_arg,
-            text_html,
-            upload_target["parse_mode"],
-            reply_to_message_id=reply_to_id,
-            quote_data=quote_data if reply_to_id else None,
-            progress=build_pyro_progress_callback(tracker, file_label, total_bytes=file_size) if actual_sender != "bot" else None,
+        sent = await execute_with_network_retry(
+            lambda: dynamic_send(
+                client,
+                msg_type,
+                target_id,
+                media_arg,
+                text_html,
+                upload_target["parse_mode"],
+                reply_to_message_id=reply_to_id,
+                quote_data=quote_data if reply_to_id else None,
+                progress=build_pyro_progress_callback(tracker, file_label, total_bytes=file_size) if actual_sender != "bot" else None,
+            ),
+            action_label=f"实时媒体发送 {message.message_id}",
+            log_tag="REALTIME_NETWORK_RETRY",
         )
         if actual_sender == "bot":
             await note_upload_success(client, file_size)
@@ -394,16 +407,20 @@ async def _send_realtime_media_upload(source_id, target_id, message, msg_type, t
             file_size = os.path.getsize(file_path)
             file_label = format_upload_label(msg_type, file_path)
             tracker = UploadProgressTracker("实时上传 [辅助账号回退]", file_size)
-            sent = await dynamic_send(
-                pyro_user_app,
-                msg_type,
-                target_id,
-                file_path,
-                text_html,
-                ParseMode.HTML,
-                reply_to_message_id=reply_to_id,
-                quote_data=quote_data if reply_to_id else None,
-                progress=build_pyro_progress_callback(tracker, file_label, total_bytes=file_size),
+            sent = await execute_with_network_retry(
+                lambda: dynamic_send(
+                    pyro_user_app,
+                    msg_type,
+                    target_id,
+                    file_path,
+                    text_html,
+                    ParseMode.HTML,
+                    reply_to_message_id=reply_to_id,
+                    quote_data=quote_data if reply_to_id else None,
+                    progress=build_pyro_progress_callback(tracker, file_label, total_bytes=file_size),
+                ),
+                action_label=f"实时媒体辅助回退 {message.message_id}",
+                log_tag="REALTIME_NETWORK_RETRY",
             )
             return sent.id
         raise
@@ -454,7 +471,11 @@ async def _send_realtime_media_group_upload(source_id, target_id, group, caption
                 f"实时上传媒体组: {len(downloaded_files)} 项",
                 total_bytes=sum(file_sizes),
             )
-        sent_msgs = await client.send_media_group(**kwargs)
+        sent_msgs = await execute_with_network_retry(
+            lambda: client.send_media_group(**kwargs),
+            action_label=f"实时媒体组发送 {group[0].message_id}",
+            log_tag="REALTIME_NETWORK_RETRY",
+        )
         if actual_sender == "bot":
             await note_upload_success(client, sum(file_sizes))
         return [sent.message_id if actual_sender == "bot" else sent.id for sent in sent_msgs]
@@ -462,7 +483,11 @@ async def _send_realtime_media_group_upload(source_id, target_id, group, caption
         if options["sender"] == "bot" and options["fallback_to_user"] and getattr(pyro_user_app, "is_initialized", False):
             await db.add_msg_log("BOT_FALLBACK", f"实时同步 组首ID:{group[0].message_id} | Bot 上传失败，已回退辅助账号重传")
             media = build_user_media_group(downloaded_files, captions, {})
-            sent_msgs = await pyro_user_app.send_media_group(chat_id=target_id, media=media)
+            sent_msgs = await execute_with_network_retry(
+                lambda: pyro_user_app.send_media_group(chat_id=target_id, media=media),
+                action_label=f"实时媒体组辅助回退 {group[0].message_id}",
+                log_tag="REALTIME_NETWORK_RETRY",
+            )
             return [sent.id for sent in sent_msgs]
         raise
     finally:
@@ -566,7 +591,11 @@ async def handle_new_post(message: Message):
                                         kwargs["quote_text"] = quote_data["text"]
                                         if quote_data.get("entities"):
                                             kwargs["quote_entities"] = quote_data["entities"]
-                                    copied = await aiogram_bot.copy_message(**kwargs)
+                                    copied = await execute_with_network_retry(
+                                        lambda: aiogram_bot.copy_message(**kwargs),
+                                        action_label=f"实时逐条复制 {item.message_id}",
+                                        log_tag="REALTIME_NETWORK_RETRY",
+                                    )
                                     await db.save_msg_mapping(source_id, item.message_id, target_id, copied.message_id)
                                     await asyncio.sleep(1)
                                 except Exception:
@@ -580,7 +609,11 @@ async def handle_new_post(message: Message):
                                 kwargs["quote_text"] = quote_data["text"]
                                 if quote_data.get("entities"):
                                     kwargs["quote_entities"] = quote_data["entities"]
-                            copied_ids = await aiogram_bot.copy_messages(**kwargs)
+                            copied_ids = await execute_with_network_retry(
+                                lambda: aiogram_bot.copy_messages(**kwargs),
+                                action_label=f"实时媒体组复制 {group[0].message_id}",
+                                log_tag="REALTIME_NETWORK_RETRY",
+                            )
                             for original, copied in zip(group, copied_ids):
                                 await db.save_msg_mapping(source_id, original.message_id, target_id, copied.message_id)
                             if quote_data and reply_to_id:
@@ -605,7 +638,11 @@ async def handle_new_post(message: Message):
                                     kwargs["quote_text"] = quote_data["text"]
                                     if quote_data.get("entities"):
                                         kwargs["quote_entities"] = quote_data["entities"]
-                                copied = await aiogram_bot.copy_message(**kwargs)
+                                copied = await execute_with_network_retry(
+                                    lambda: aiogram_bot.copy_message(**kwargs),
+                                    action_label=f"实时媒体组回退逐条复制 {item.message_id}",
+                                    log_tag="REALTIME_NETWORK_RETRY",
+                                )
                                 await db.save_msg_mapping(source_id, item.message_id, target_id, copied.message_id)
                                 await asyncio.sleep(1)
                             except Exception:
@@ -675,7 +712,11 @@ async def handle_new_post(message: Message):
                     kwargs["quote_text"] = quote_data["text"]
                     if quote_data.get("entities"):
                         kwargs["quote_entities"] = quote_data["entities"]
-                copied = await (aiogram_bot.send_message(**kwargs) if not has_media else aiogram_bot.copy_message(**kwargs))
+                copied = await execute_with_network_retry(
+                    lambda: aiogram_bot.send_message(**kwargs) if not has_media else aiogram_bot.copy_message(**kwargs),
+                    action_label=f"实时消息发送 {message.message_id}",
+                    log_tag="REALTIME_NETWORK_RETRY",
+                )
                 sent_id = copied.message_id
             else:
                 kwargs = {"chat_id": target_id, "from_chat_id": source_id, "message_id": message.message_id}
@@ -685,7 +726,11 @@ async def handle_new_post(message: Message):
                     kwargs["quote_text"] = quote_data["text"]
                     if quote_data.get("entities"):
                         kwargs["quote_entities"] = quote_data["entities"]
-                copied = await aiogram_bot.copy_message(**kwargs)
+                copied = await execute_with_network_retry(
+                    lambda: aiogram_bot.copy_message(**kwargs),
+                    action_label=f"实时消息复制 {message.message_id}",
+                    log_tag="REALTIME_NETWORK_RETRY",
+                )
                 sent_id = copied.message_id
 
             if sent_id is None:

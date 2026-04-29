@@ -9,7 +9,7 @@ from aiogram.types import FSInputFile
 
 import bot_engine
 import database as db
-from services.sync_services import safe_execute
+from services.sync_services import execute_with_network_retry, safe_execute
 
 from ..runtime import sync_state
 from ..senders import resolve_upload_target, should_fallback_to_user
@@ -106,7 +106,12 @@ async def _execute_with_retry(
     while True:
         attempt += 1
         try:
-            return await safe_execute(coro_factory(), sync_state)
+            return await execute_with_network_retry(
+                coro_factory,
+                action_label=action_label,
+                sync_state=sync_state,
+                log_tag="JSON_NETWORK_RETRY",
+            )
         except Exception as exc:
             if sync_state["stop_requested"]:
                 raise

@@ -11,6 +11,28 @@ import database as db
 
 MESSAGE_LINK_RE = re.compile(r"https?://t\.me/(?:c/)?[^/\s]+/\d+")
 USERNAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{2,}$")
+NETWORK_RETRY_WAIT_SECONDS = 15
+NETWORK_RETRY_MAX_RETRIES = 2
+TEMPORARY_NETWORK_ERROR_PATTERNS = (
+    "serverdisconnectederror",
+    "server disconnected",
+    "clientconnectorerror",
+    "clientoserror",
+    "connection reset by peer",
+    "connection reset",
+    "connection aborted",
+    "connection refused",
+    "cannot connect to host",
+    "network is unreachable",
+    "name or service not known",
+    "temporarily unavailable",
+    "timeouterror",
+    "timed out",
+)
+
+
+class SyncNetworkRetryExhaustedError(RuntimeError):
+    pass
 
 
 def normalize_channel_username(channel_ref: str) -> str:
@@ -214,6 +236,11 @@ def create_progress_callback(action_name: str, sync_state: dict):
     return progress
 
 
+def is_temporary_network_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(pattern in text for pattern in TEMPORARY_NETWORK_ERROR_PATTERNS)
+
+
 async def safe_execute(coro, sync_state: dict):
     task = asyncio.create_task(coro)
     while not task.done():
@@ -225,6 +252,42 @@ async def safe_execute(coro, sync_state: dict):
         return await task
     except asyncio.CancelledError as exc:
         raise Exception("STOP_REQUESTED") from exc
+
+
+async def execute_with_network_retry(
+    coro_factory,
+    *,
+    action_label: str,
+    sync_state: dict | None = None,
+    log_tag: str = "NETWORK_RETRY",
+    use_msg_log: bool = True,
+    wait_seconds: int = NETWORK_RETRY_WAIT_SECONDS,
+    max_retries: int = NETWORK_RETRY_MAX_RETRIES,
+):
+    attempt = 0
+    while True:
+        try:
+            if sync_state is None:
+                return await coro_factory()
+            return await safe_execute(coro_factory(), sync_state)
+        except Exception as exc:
+            if sync_state and sync_state.get("stop_requested"):
+                raise
+            if not is_temporary_network_error(exc):
+                raise
+            if attempt >= max_retries:
+                raise SyncNetworkRetryExhaustedError(
+                    f"{action_label} 连续重试 {max_retries} 次后仍无法连接: {exc}"
+                ) from exc
+            attempt += 1
+            if sync_state is not None:
+                sync_state["current_text"] = f"网络中断，{wait_seconds} 秒后重试\n{action_label}"
+            message = f"{action_label} | 检测到临时断网，{wait_seconds} 秒后重试 ({attempt}/{max_retries}) | {exc}"
+            if use_msg_log:
+                await db.add_msg_log(log_tag, message)
+            else:
+                await db.add_log("WARNING", message)
+            await asyncio.sleep(wait_seconds)
 
 
 async def log_sync_error(prefix: str, exc: Exception):

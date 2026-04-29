@@ -2,6 +2,7 @@ import unittest
 import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
+import asyncio
 
 import bot_engine
 import database
@@ -144,6 +145,31 @@ class SyncServiceTests(unittest.IsolatedAsyncioTestCase):
         speed = sync_services.compute_progress_speed(20 * 1024 * 1024, 10 * 1024 * 1024, 2)
         self.assertAlmostEqual(speed, 5.0)
 
+    def test_is_temporary_network_error(self):
+        self.assertTrue(sync_services.is_temporary_network_error(Exception("HTTP Client says - ServerDisconnectedError: Server disconnected")))
+        self.assertTrue(sync_services.is_temporary_network_error(Exception("TimeoutError")))
+        self.assertFalse(sync_services.is_temporary_network_error(Exception("retry after 10")))
+
+    async def test_execute_with_network_retry_retries_twice_then_raises(self):
+        calls = {"count": 0}
+
+        async def failing():
+            calls["count"] += 1
+            raise Exception("HTTP Client says - ServerDisconnectedError: Server disconnected")
+
+        with patch("services.sync_services.db.add_msg_log", AsyncMock()) as mock_add_msg_log, \
+             patch("services.sync_services.asyncio.sleep", AsyncMock()):
+            with self.assertRaises(sync_services.SyncNetworkRetryExhaustedError):
+                await sync_services.execute_with_network_retry(
+                    failing,
+                    action_label="测试动作",
+                    sync_state=None,
+                    log_tag="TEST_NETWORK_RETRY",
+                )
+
+        self.assertEqual(calls["count"], 3)
+        self.assertEqual(mock_add_msg_log.await_count, 2)
+
     async def test_process_master_sync_json_does_not_require_source_id(self):
         with patch("sync_worker.clone.process.db.get_all_settings", AsyncMock(return_value={})), \
              patch("sync_worker.clone.process.resolve_chat_id", AsyncMock(return_value=-100456)) as mock_resolve, \
@@ -219,6 +245,26 @@ class SyncServiceTests(unittest.IsolatedAsyncioTestCase):
             await history.process_master_sync("json", "bot", "", "@target", 1, 0, 0, "fake.json", False, "", 3)
 
         mock_add_log.assert_any_await("INFO", "任务运行完毕：JSON | 已处理 0 / 0 | 跳过 0")
+
+    async def test_process_master_sync_logs_failed_summary_for_network_abort(self):
+        async def _raise_with_progress(*args, **kwargs):
+            history.sync_state["current"] = 36
+            history.sync_state["total"] = 33
+            history.sync_state["skipped"] = 36
+            raise sync_services.SyncNetworkRetryExhaustedError("JSON 文本发送 1 连续重试 2 次后仍无法连接")
+
+        with patch("sync_worker.clone.process.db.get_all_settings", AsyncMock(return_value={})), \
+             patch("sync_worker.clone.process.resolve_chat_id", AsyncMock(return_value=-100456)), \
+             patch(
+                 "sync_worker.clone.process.process_json_sync",
+                 AsyncMock(side_effect=_raise_with_progress),
+             ), \
+             patch("sync_worker.clone.process.log_sync_error", AsyncMock()) as mock_log_sync_error, \
+             patch("sync_worker.clone.process.db.add_log", AsyncMock()) as mock_add_log:
+            await history.process_master_sync("json", "bot", "", "@target", 1, 0, 0, "fake.json", False, "", 3)
+
+        mock_log_sync_error.assert_awaited()
+        mock_add_log.assert_any_await("ERROR", "任务异常终止：JSON | 已处理 36 / 33 | 跳过 36")
 
     def test_bot_media_group_can_attach_thumbnail(self):
         thumbnail = history.FSInputFile(__file__)

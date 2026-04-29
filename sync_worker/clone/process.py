@@ -11,8 +11,10 @@ import bot_engine
 import database as db
 from app_config import get_config
 from services.sync_services import (
+    SyncNetworkRetryExhaustedError,
     build_link_rewrite_context,
     create_progress_callback,
+    execute_with_network_retry,
     get_quote_payload,
     log_sync_error,
     resolve_chat_id,
@@ -88,14 +90,24 @@ def _add_quote_kwargs(kwargs: dict, quote_data, reply_to_id):
 
 async def _safe_get_messages(app, source_id, msg_ids):
     try:
-        return await app.get_messages(source_id, msg_ids)
+        return await execute_with_network_retry(
+            lambda: app.get_messages(source_id, msg_ids),
+            action_label=f"批量拉取消息 {msg_ids[0]}-{msg_ids[-1]}",
+            sync_state=sync_state,
+            log_tag="SYNC_NETWORK_RETRY",
+        )
     except Exception as exc:
         if "topics" not in str(exc).lower():
             raise
     result = []
     for msg_id in msg_ids:
         try:
-            msg = await app.get_messages(source_id, msg_id)
+            msg = await execute_with_network_retry(
+                lambda msg_id=msg_id: app.get_messages(source_id, msg_id),
+                action_label=f"逐条拉取消息 {msg_id}",
+                sync_state=sync_state,
+                log_tag="SYNC_NETWORK_RETRY",
+            )
         except Exception:
             msg = None
         result.append(msg)
@@ -112,8 +124,8 @@ async def _send_api_media(
     quote_data=None,
     has_spoiler=False,
 ):
-    return await safe_execute(
-        dynamic_send(
+    return await execute_with_network_retry(
+        lambda: dynamic_send(
             app,
             msg_type,
             target_id,
@@ -124,12 +136,28 @@ async def _send_api_media(
             quote_data=quote_data,
             has_spoiler=has_spoiler,
         ),
-        sync_state,
+        action_label=f"API 媒体消息发送 {msg_type}",
+        sync_state=sync_state,
+        log_tag="SYNC_NETWORK_RETRY",
     )
 
 
 def _api_group_captions(rewritten_captions):
     return [normalize_pyro_html(caption_html or "") for caption_html in rewritten_captions]
+
+
+async def _fetch_last_message_id(app, source_id):
+    async def _load_last():
+        async for last_msg in app.get_chat_history(source_id, limit=1):
+            return last_msg.id
+        return 1
+
+    return await execute_with_network_retry(
+        _load_last,
+        action_label=f"获取频道末尾消息 {source_id}",
+        sync_state=sync_state,
+        log_tag="SYNC_NETWORK_RETRY",
+    )
 
 
 async def sync_single_message(mode, sender, app, bot, source_id, target_id, msg, safe_delay, force_send, hash_perturb=False, clone_fallback_to_user=True, include_external_source_header: bool = False):
@@ -168,7 +196,14 @@ async def sync_single_message(mode, sender, app, bot, source_id, target_id, msg,
                     }
                     if quote_data.get("entities"):
                         kwargs["quote_entities"] = quote_data["entities"]
-                    sent_id = (await safe_execute(app.send_message(**kwargs), sync_state)).id
+                    sent_id = (
+                        await execute_with_network_retry(
+                            lambda: app.send_message(**kwargs),
+                            action_label=f"API 文本发送 {msg.id}",
+                            sync_state=sync_state,
+                            log_tag="SYNC_NETWORK_RETRY",
+                        )
+                    ).id
                 else:
                     media_ref = get_media_reference(msg, msg_type)
                     if not media_ref:
@@ -192,7 +227,14 @@ async def sync_single_message(mode, sender, app, bot, source_id, target_id, msg,
                     kwargs = {"chat_id": target_id, "text": new_html, "parse_mode": ParseMode.HTML}
                     if reply_to_id:
                         kwargs["reply_to_message_id"] = reply_to_id
-                    sent_id = (await safe_execute(app.send_message(**kwargs), sync_state)).id
+                    sent_id = (
+                        await execute_with_network_retry(
+                            lambda: app.send_message(**kwargs),
+                            action_label=f"API 文本发送 {msg.id}",
+                            sync_state=sync_state,
+                            log_tag="SYNC_NETWORK_RETRY",
+                        )
+                    ).id
                 elif media_has_spoiler:
                     media_ref = get_media_reference(msg, msg_type)
                     if not media_ref:
@@ -202,11 +244,25 @@ async def sync_single_message(mode, sender, app, bot, source_id, target_id, msg,
                 else:
                     kwargs = _add_reply_kwargs(_base_api_copy_kwargs(target_id, source_id, msg.id), reply_to_id)
                     kwargs.update({"caption": new_html, "parse_mode": ParseMode.HTML})
-                    sent_id = (await safe_execute(app.copy_message(**kwargs), sync_state)).id
+                    sent_id = (
+                        await execute_with_network_retry(
+                            lambda: app.copy_message(**kwargs),
+                            action_label=f"API 复制消息 {msg.id}",
+                            sync_state=sync_state,
+                            log_tag="SYNC_NETWORK_RETRY",
+                        )
+                    ).id
             else:
                 kwargs = _base_api_copy_kwargs(target_id, source_id, msg.id)
                 _add_reply_kwargs(kwargs, reply_to_id)
-                sent_id = (await safe_execute(app.copy_message(**kwargs), sync_state)).id
+                sent_id = (
+                    await execute_with_network_retry(
+                        lambda: app.copy_message(**kwargs),
+                        action_label=f"API 复制消息 {msg.id}",
+                        sync_state=sync_state,
+                        log_tag="SYNC_NETWORK_RETRY",
+                    )
+                ).id
         else:
             if not has_media:
                 sent = await _execute_with_clone_retry(
@@ -230,18 +286,22 @@ async def sync_single_message(mode, sender, app, bot, source_id, target_id, msg,
                         break
                     try:
                         download_target = _build_temp_download_path(msg, msg_type)
-                        file_path = await safe_execute(
-                            app.download_media(
+                        file_path = await execute_with_network_retry(
+                            lambda: app.download_media(
                                 msg,
                                 file_name=download_target,
                                 progress=create_progress_callback("下载中", sync_state),
                             ),
-                            sync_state,
+                            action_label=f"下载媒体 {msg.id}",
+                            sync_state=sync_state,
+                            log_tag="CLONE_NETWORK_RETRY",
                         )
                         if file_path:
                             break
                     except Exception as exc:
                         if "STOP_REQUESTED" in str(exc):
+                            raise
+                        if isinstance(exc, SyncNetworkRetryExhaustedError):
                             raise
                         retry_after = _parse_retry_after_seconds(exc)
                         if retry_after is not None:
@@ -305,6 +365,8 @@ async def sync_single_message(mode, sender, app, bot, source_id, target_id, msg,
                     except Exception as exc:
                         if "STOP_REQUESTED" in str(exc):
                             raise
+                        if isinstance(exc, SyncNetworkRetryExhaustedError):
+                            raise
                         if actual_sender == "bot" and _is_request_entity_too_large(exc):
                             bot_size_limit_hit = True
                             break
@@ -358,6 +420,8 @@ async def sync_single_message(mode, sender, app, bot, source_id, target_id, msg,
                         except Exception as exc:
                             if "STOP_REQUESTED" in str(exc):
                                 raise
+                            if isinstance(exc, SyncNetworkRetryExhaustedError):
+                                raise
                             await asyncio.sleep(2)
 
                 try:
@@ -379,6 +443,8 @@ async def sync_single_message(mode, sender, app, bot, source_id, target_id, msg,
     except Exception as exc:
         if mode == "api" and _is_chat_forwards_restricted(exc):
             raise RuntimeError("该频道不支持转发，请使用下载重传") from exc
+        if isinstance(exc, SyncNetworkRetryExhaustedError):
+            raise
         if sync_state["stop_requested"]:
             return
         await log_sync_error(f"单条同步异常 ID {msg.id}", exc)
@@ -418,12 +484,22 @@ async def sync_media_group(mode, sender, app, bot, source_id, target_id, group, 
                         kwargs["has_spoilers"] = spoiler_flags
                     _add_reply_kwargs(kwargs, reply_to_id)
                     _add_quote_kwargs(kwargs, quote_data, reply_to_id)
-                    copied_msgs = await safe_execute(app.copy_media_group(**kwargs), sync_state)
+                    copied_msgs = await execute_with_network_retry(
+                        lambda: app.copy_media_group(**kwargs),
+                        action_label=f"API 媒体组复制 {group[0].id}",
+                        sync_state=sync_state,
+                        log_tag="SYNC_NETWORK_RETRY",
+                    )
                 else:
                     kwargs = _base_api_copy_kwargs(target_id, source_id, group[0].id)
                     _add_reply_kwargs(kwargs, reply_to_id)
                     _add_quote_kwargs(kwargs, quote_data, reply_to_id)
-                    copied_msgs = await safe_execute(app.copy_media_group(**kwargs), sync_state)
+                    copied_msgs = await execute_with_network_retry(
+                        lambda: app.copy_media_group(**kwargs),
+                        action_label=f"API 媒体组复制 {group[0].id}",
+                        sync_state=sync_state,
+                        log_tag="SYNC_NETWORK_RETRY",
+                    )
                 for orig_m, new_m in zip(group, copied_msgs):
                     await record_success(source_id, target_id, orig_m.id, new_m.id, force_send=force_send)
                 if captions_changed:
@@ -439,6 +515,8 @@ async def sync_media_group(mode, sender, app, bot, source_id, target_id, group, 
             except Exception as exc:
                 if "STOP_REQUESTED" in str(exc):
                     raise
+                if isinstance(exc, SyncNetworkRetryExhaustedError):
+                    raise
                 if _is_chat_forwards_restricted(exc):
                     raise RuntimeError("该频道不支持转发，请使用下载重传") from exc
     else:
@@ -453,13 +531,15 @@ async def sync_media_group(mode, sender, app, bot, source_id, target_id, group, 
                 async def dl_album_item(m_item, idx):
                     async with sem:
                         item_type, _ = get_msg_meta(m_item, mode)
-                        return await safe_execute(
-                            app.download_media(
+                        return await execute_with_network_retry(
+                            lambda: app.download_media(
                                 m_item,
                                 file_name=_build_temp_download_path(m_item, item_type),
                                 progress=create_progress_callback(f"并发下载 [{idx}]", sync_state),
                             ),
-                            sync_state,
+                            action_label=f"媒体组下载 {m_item.id}",
+                            sync_state=sync_state,
+                            log_tag="CLONE_NETWORK_RETRY",
                         )
 
                 results = await asyncio.gather(
@@ -501,6 +581,8 @@ async def sync_media_group(mode, sender, app, bot, source_id, target_id, group, 
                 dl_success = True
                 break
             except Exception as exc:
+                if isinstance(exc, SyncNetworkRetryExhaustedError):
+                    raise
                 await db.add_msg_log("CLONE_GROUP_DOWNLOAD_RETRY", f"组首ID:{group[0].id} | 第 {attempt}/3 次下载异常 | {exc}")
                 await asyncio.sleep(2)
 
@@ -596,6 +678,8 @@ async def sync_media_group(mode, sender, app, bot, source_id, target_id, group, 
                 break
             except Exception as exc:
                 if "STOP_REQUESTED" in str(exc):
+                    raise
+                if isinstance(exc, SyncNetworkRetryExhaustedError):
                     raise
                 if actual_sender == "bot" and _is_request_entity_too_large(exc):
                     bot_size_limit_hit = True
@@ -741,8 +825,7 @@ async def process_master_sync(
             if not start_id:
                 start_id = 1
             if not end_id:
-                async for last_msg in app.get_chat_history(source_id, limit=1):
-                    end_id = last_msg.id
+                end_id = await _fetch_last_message_id(app, source_id)
             if not end_id:
                 end_id = 1
             sync_state["total"] = end_id - start_id + 1
@@ -752,6 +835,8 @@ async def process_master_sync(
                     break
                 try:
                     msgs = await _safe_get_messages(source_id=source_id, app=app, msg_ids=list(range(chunk_start, min(chunk_start + 99, end_id) + 1)))
+                except SyncNetworkRetryExhaustedError:
+                    raise
                 except Exception:
                     continue
 
@@ -817,7 +902,10 @@ async def process_master_sync(
         await log_sync_error("同步中断", exc)
     finally:
         if final_status == "failed":
-            await db.add_log("INFO", f"任务结束：{sync_state.get('mode', mode.upper())} 异常中止")
+            await db.add_log(
+                "ERROR",
+                f"任务异常终止：{sync_state.get('mode', mode.upper())} | 已处理 {sync_state.get('current', 0)} / {sync_state.get('total', 0)} | 跳过 {sync_state.get('skipped', 0)}",
+            )
         elif sync_state.get("stop_requested") or final_status == "stopped":
             await db.add_log("INFO", f"任务结束：{sync_state.get('mode', mode.upper())} 已停止")
         else:

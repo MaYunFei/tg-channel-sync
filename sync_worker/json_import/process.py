@@ -12,8 +12,10 @@ import database as db
 from app_config import get_config
 from services.sync_services import (
     MESSAGE_LINK_RE,
+    SyncNetworkRetryExhaustedError,
     build_link_rewrite_context,
     build_json_source_scope_id,
+    execute_with_network_retry,
     log_sync_error,
     normalize_channel_username,
     resolve_chat_id,
@@ -120,6 +122,8 @@ async def _send_json_group_via_user(group, target_id, rewritten_captions, file_e
             retry_unknown_errors=False,
         )
     except Exception as exc:
+        if isinstance(exc, SyncNetworkRetryExhaustedError):
+            raise
         if _is_topics_parse_error(exc):
             await db.add_msg_log(
                 "JSON_TOPICS_COMPAT",
@@ -216,18 +220,22 @@ async def send_json_media_group(
                 group_items.append((item, media_path, "video" if media_type == "animation" else media_type))
             tracker, media_list = build_bot_media_group(group_items, normalized_captions, {}, total_bytes, upload_target["label"], spoiler_flags)
             try:
-                sent_group = await safe_execute(
-                    upload_target["client"].send_media_group(
+                sent_group = await execute_with_network_retry(
+                    lambda: upload_target["client"].send_media_group(
                         target_id,
                         media_list,
                         reply_to_message_id=reply_to_id,
                     ),
-                    sync_state,
+                    action_label=f"JSON 媒体组发送 {first_id}",
+                    sync_state=sync_state,
+                    log_tag="JSON_NETWORK_RETRY",
                 )
                 await bot_engine.note_upload_success(upload_target["client"], sum(file_sizes))
                 break
             except Exception as exc:
                 if sync_state["stop_requested"]:
+                    raise
+                if isinstance(exc, SyncNetworkRetryExhaustedError):
                     raise
                 if _is_request_entity_too_large(exc):
                     if _json_should_fallback_to_user(sender, clone_fallback_to_user):
@@ -463,9 +471,11 @@ async def process_json_sync(
                                             target_id, file, caption=caption, parse_mode="HTML", reply_to_message_id=reply_to_id
                                         )
                                     elif media_type == "sticker":
-                                        sent = await safe_execute(
-                                            upload_target["client"].send_sticker(target_id, file, reply_to_message_id=reply_to_id),
-                                            sync_state,
+                                        sent = await execute_with_network_retry(
+                                            lambda: upload_target["client"].send_sticker(target_id, file, reply_to_message_id=reply_to_id),
+                                            action_label=f"JSON 贴纸发送 {msg_id}",
+                                            sync_state=sync_state,
+                                            log_tag="JSON_NETWORK_RETRY",
                                         )
                                         await bot_engine.note_upload_success(upload_target["client"], file_size)
                                         break
@@ -474,11 +484,18 @@ async def process_json_sync(
                                             target_id, file, caption=caption, parse_mode="HTML", reply_to_message_id=reply_to_id
                                         )
                                     if media_type != "sticker":
-                                        sent = await safe_execute(send_coro(), sync_state)
+                                        sent = await execute_with_network_retry(
+                                            send_coro,
+                                            action_label=f"JSON 媒体发送 {msg_id}",
+                                            sync_state=sync_state,
+                                            log_tag="JSON_NETWORK_RETRY",
+                                        )
                                         await bot_engine.note_upload_success(upload_target["client"], file_size)
                                         break
                                 except Exception as exc:
                                     if sync_state["stop_requested"]:
+                                        raise
+                                    if isinstance(exc, SyncNetworkRetryExhaustedError):
                                         raise
                                     if media_type == "sticker":
                                         thumb = str(msg.get("thumbnail") or "")
@@ -610,18 +627,22 @@ async def process_json_sync(
                             if sync_state["stop_requested"]:
                                 break
                             try:
-                                sent = await safe_execute(
-                                    upload_target["client"].send_message(
+                                sent = await execute_with_network_retry(
+                                    lambda: upload_target["client"].send_message(
                                         target_id,
                                         text,
                                         parse_mode="HTML",
                                         reply_to_message_id=reply_to_id,
                                     ),
-                                    sync_state,
+                                    action_label=f"JSON 文本发送 {msg_id}",
+                                    sync_state=sync_state,
+                                    log_tag="JSON_NETWORK_RETRY",
                                 )
                                 break
                             except Exception as exc:
                                 if sync_state["stop_requested"]:
+                                    raise
+                                if isinstance(exc, SyncNetworkRetryExhaustedError):
                                     raise
                                 retry_after = _parse_retry_after_seconds(exc)
                                 if retry_after is not None:
@@ -658,6 +679,8 @@ async def process_json_sync(
             except Exception as exc:
                 if sync_state["stop_requested"]:
                     break
+                if isinstance(exc, SyncNetworkRetryExhaustedError):
+                    raise
                 await log_sync_error(f"JSON 消息上传失败 ID {msg_id}", exc)
 
             await asyncio.sleep(safe_delay)

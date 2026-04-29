@@ -5,7 +5,7 @@ import os
 import re
 
 import database as db
-from services.sync_services import safe_execute
+from services.sync_services import execute_with_network_retry, safe_execute
 
 from ..runtime import TEMP_DIR, sync_state
 
@@ -80,7 +80,12 @@ async def _download_media_thumbnail(app, msg, msg_type: str) -> str | None:
 async def _execute_with_clone_retry(coro_factory, *, action_label: str):
     while True:
         try:
-            return await safe_execute(coro_factory(), sync_state)
+            return await execute_with_network_retry(
+                coro_factory,
+                action_label=action_label,
+                sync_state=sync_state,
+                log_tag="CLONE_NETWORK_RETRY",
+            )
         except Exception as exc:
             if sync_state.get("stop_requested"):
                 raise
