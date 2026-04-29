@@ -40,8 +40,14 @@ def _json_should_append_to_heuristic_group(group: list[dict], msg: dict, window_
     curr_id = int(msg.get("id") or 0)
     if curr_id != prev_id + 1:
         return False
-    if msg.get("reply_to_message_id"):
-        return False
+    reply_to_message_id = int(msg.get("reply_to_message_id") or 0)
+    if reply_to_message_id:
+        # Telegram 导出的超长图片串有时会在同一时间窗口内把后续图片记成
+        # “回复首图”的普通消息。这里让窗口优先，只要回复目标仍在当前窗口内，
+        # 就继续按同一媒体序列归并；真正回复到窗口外消息时才断组。
+        group_msg_ids = {int(item.get("id") or 0) for item in group}
+        if reply_to_message_id not in group_msg_ids:
+            return False
     prev_ts = _json_message_timestamp(prev)
     curr_ts = _json_message_timestamp(msg)
     if prev_ts and curr_ts and curr_ts - prev_ts > max(1, int(window_seconds or JSON_MEDIA_GROUP_WINDOW_SECONDS)):

@@ -144,6 +144,49 @@ class JsonSyncTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([[item["id"] for item in group] for group in grouped], [list(range(1, 11)), [11]])
 
+    def test_group_json_messages_keeps_long_window_sequence_when_later_items_reply_to_first(self):
+        messages = [
+            {
+                "id": index,
+                "type": "message",
+                "date_unixtime": "1777273064" if index <= 18 else "1777273065",
+                "photo": f"photos/{index}.jpg",
+                "text": f"图片说明 {index}/32",
+                **({"reply_to_message_id": 6} if index >= 16 else {}),
+            }
+            for index in range(6, 38)
+        ]
+
+        grouped = json_sync.group_json_messages(messages, 3)
+
+        self.assertEqual(
+            [[item["id"] for item in group] for group in grouped],
+            [list(range(6, 16)), list(range(16, 26)), list(range(26, 36)), [36, 37]],
+        )
+
+    def test_group_json_messages_does_not_merge_reply_to_message_outside_window(self):
+        messages = [
+            {
+                "id": 1,
+                "type": "message",
+                "date_unixtime": "1777273064",
+                "photo": "photos/1.jpg",
+                "text": "图片说明 1",
+            },
+            {
+                "id": 2,
+                "type": "message",
+                "date_unixtime": "1777273064",
+                "photo": "photos/2.jpg",
+                "text": "图片说明 2",
+                "reply_to_message_id": 999,
+            },
+        ]
+
+        grouped = json_sync.group_json_messages(messages, 3)
+
+        self.assertEqual([[item["id"] for item in group] for group in grouped], [[1], [2]])
+
     async def test_send_json_media_group_keeps_document_captions(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             for name in ["a.txt", "b.txt"]:
