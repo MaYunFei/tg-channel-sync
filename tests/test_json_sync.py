@@ -39,6 +39,25 @@ class JsonSyncTests(unittest.IsolatedAsyncioTestCase):
                     "上传文件: fake.txt",
                 )
 
+    async def test_send_json_single_via_user_omits_none_caption(self):
+        with patch("sync_worker.json_import.process.bot_engine.pyro_user_app") as mock_app:
+            mock_app.is_initialized = True
+            mock_app.send_photo = AsyncMock(return_value=type("Sent", (), {"id": 1001})())
+            with patch("sync_worker.json_import.process.os.path.getsize", return_value=3):
+                await json_sync._send_json_single_via_user(
+                    -100456,
+                    "photo",
+                    "fake.jpg",
+                    None,
+                    None,
+                    json_sync.SharedUploadProgressTracker("上传中", 3),
+                    "上传图片: fake.jpg",
+                )
+
+        kwargs = mock_app.send_photo.await_args.kwargs
+        self.assertNotIn("caption", kwargs)
+        self.assertNotIn("parse_mode", kwargs)
+
     def test_group_json_messages_groups_documents_without_mixing_visual_media(self):
         messages = [
             {
@@ -510,10 +529,45 @@ class JsonSyncTests(unittest.IsolatedAsyncioTestCase):
                  patch("sync_worker.json_import.process.update_state_and_check_skip", AsyncMock(return_value=False)), \
                  patch("sync_worker.json_import.process.record_success", AsyncMock()), \
                  patch("sync_worker.json_import.process.bot_engine.pyro_user_app", fake_user), \
-                 patch("sync_worker.json_import.process.bot_engine.aiogram_bot"):
+                     patch("sync_worker.json_import.process.bot_engine.aiogram_bot"):
                 await json_sync.process_json_sync("user", "@target", str(json_path), 0.5, False)
 
             fake_user.send_message.assert_awaited_once()
+
+    async def test_process_json_sync_user_text_accepts_pyrogram_message_id_field(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            json_path = Path(temp_dir) / "result.json"
+            json_path.write_text(
+                json.dumps(
+                    {
+                        "messages": [
+                            {
+                                "id": 10,
+                                "type": "message",
+                                "text": "hello",
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            fake_user = type("FakeUser", (), {"is_initialized": True, "send_message": AsyncMock(return_value=type("Sent", (), {"id": 1010})())})()
+            with patch("sync_worker.json_import.process.resolve_chat_id", AsyncMock(return_value=-100456)), \
+                 patch("sync_worker.json_import.process.build_link_rewrite_context", AsyncMock(return_value={})), \
+                 patch("sync_worker.json_import.process.resolve_reply_target", AsyncMock(return_value=None)), \
+                 patch("sync_worker.json_import.process.update_state_and_check_skip", AsyncMock(return_value=False)), \
+                 patch("sync_worker.json_import.process.rewrite_message_links", AsyncMock(side_effect=lambda text, *_: (text, 0))), \
+                 patch("sync_worker.json_import.process.db.get_all_settings", AsyncMock(return_value={"sync_text": "1"})), \
+                 patch("sync_worker.json_import.process.db.add_msg_log", AsyncMock()), \
+                 patch("sync_worker.json_import.process.db.apply_message_filters", AsyncMock(return_value=(False, "hello"))), \
+                 patch("sync_worker.json_import.process.record_success", AsyncMock()) as mock_record_success, \
+                 patch("sync_worker.json_import.process.bot_engine.pyro_user_app", fake_user), \
+                 patch("sync_worker.json_import.process.bot_engine.aiogram_bot"):
+                await json_sync.process_json_sync("user", "@target", str(json_path), 0, False)
+
+            mock_record_success.assert_awaited_once_with(0, -100456, 10, 1010, force_send=False)
 
     async def test_process_json_sync_can_prepend_external_source_header(self):
         with tempfile.TemporaryDirectory() as temp_dir:

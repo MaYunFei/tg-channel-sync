@@ -55,6 +55,10 @@ def _pyro_file_ref(media_path: str) -> str:
     return media_path
 
 
+def _get_sent_message_id(sent_msg):
+    return getattr(sent_msg, "message_id", None) or getattr(sent_msg, "id", None)
+
+
 async def _prepare_json_media_path(media_path: str, media_type: str, msg_id: int, hash_perturb: bool) -> tuple[str, bool]:
     return await prepare_json_media_for_send(media_path, media_type, msg_id, hash_perturb, temp_dir=TEMP_DIR)
 
@@ -64,11 +68,12 @@ async def _send_json_single_via_user(target_id, media_type, media_path, caption,
     if not getattr(app, "is_initialized", False):
         raise JsonSyncFatalError("Bot 上传体积超限，且辅助账号未登录，无法回退重传")
     spoiler_kwargs = {"has_spoiler": True} if has_spoiler and media_type in {"photo", "video", "animation"} else {}
+    caption_kwargs = {"caption": caption, "parse_mode": ParseMode.HTML} if caption else {}
     return await _execute_with_retry(
         lambda: getattr(app, f"send_{media_type}", app.send_document)(
             chat_id=target_id,
             **({"sticker": _pyro_file_ref(media_path)} if media_type == "sticker" else {media_type if hasattr(app, f"send_{media_type}") else "document": _pyro_file_ref(media_path)}),
-            **({} if media_type == "sticker" else {"caption": caption, "parse_mode": ParseMode.HTML}),
+            **({} if media_type == "sticker" else caption_kwargs),
             **({"reply_to_message_id": reply_to_id} if reply_to_id else {}),
             **spoiler_kwargs,
             progress=build_pyro_progress_callback(tracker, file_label, total_bytes=os.path.getsize(media_path)),
@@ -266,7 +271,7 @@ async def send_json_media_group(
         if sent_group is None:
             return None
         for original_msg, sent_msg in zip(group, sent_group):
-            new_id = sent_msg.message_id if hasattr(sent_msg, "message_id") else sent_msg.id
+            new_id = _get_sent_message_id(sent_msg)
             sent_ids.append(new_id)
             await record_success(source_scope_id, target_id, int(original_msg.get("id") or 0), new_id, force_send=force_send)
 
@@ -605,7 +610,7 @@ async def process_json_sync(
                                 )
                             if sent is None:
                                 return
-                        sent_id = sent.message_id if hasattr(sent, "message_id") else sent.id
+                        sent_id = _get_sent_message_id(sent)
                     finally:
                         if created_temp:
                             try:
@@ -664,7 +669,7 @@ async def process_json_sync(
                             sent = await _send_json_text_via_user(target_id, text, reply_to_id)
                         if sent is None:
                             return
-                    sent_id = sent.message_id
+                    sent_id = _get_sent_message_id(sent)
                 else:
                     if media_path and not os.path.exists(media_path):
                         await db.add_msg_log("JSON_MEDIA_MISSING", f"消息ID:{msg_id} | 媒体文件不存在，已跳过: {media_path}")
