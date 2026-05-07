@@ -18,10 +18,21 @@ from ..runtime import sync_state
 CHUNK_SIZE = 1024 * 1024
 MAX_WORKERS = 8
 CHUNK_RETRY_ATTEMPTS = 2
+SUPPORTED_CHUNK_MEDIA_TYPES = {"video", "animation", "document"}
 
 
 class ChunkedDownloadFallback(RuntimeError):
     pass
+
+
+def _is_limit_invalid_error(exc: Exception) -> bool:
+    text = str(exc or "").upper()
+    return "LIMIT_INVALID" in text or "LIMIT PARAMETER IS INVALID" in text
+
+
+def _is_auth_bytes_invalid_error(exc: Exception) -> bool:
+    text = str(exc or "").upper()
+    return "AUTH_BYTES_INVALID" in text
 
 
 @dataclass(slots=True)
@@ -34,6 +45,10 @@ class ChunkDownloadRequest:
 
 def _resolve_media_obj(msg, msg_type: str):
     return getattr(msg, msg_type, None)
+
+
+def supports_chunked_download(msg_type: str) -> bool:
+    return str(msg_type or "").strip() in SUPPORTED_CHUNK_MEDIA_TYPES
 
 
 def build_chunk_download_request(msg, msg_type: str) -> ChunkDownloadRequest:
@@ -64,7 +79,7 @@ def build_chunk_download_request(msg, msg_type: str) -> ChunkDownloadRequest:
             file_reference=decoded.file_reference,
             thumb_size=thumb_size,
         )
-    elif msg_type in {"video", "animation", "audio", "voice", "document"}:
+    elif supports_chunked_download(msg_type):
         location = raw.types.InputDocumentFileLocation(
             id=decoded.media_id,
             access_hash=decoded.access_hash,
@@ -82,24 +97,30 @@ def build_chunk_download_request(msg, msg_type: str) -> ChunkDownloadRequest:
     )
 
 
-async def _create_media_session(app, dc_id: int, exported_auth=None) -> Session:
+async def _create_media_session(app, dc_id: int) -> Session:
     base_dc_id = await app.storage.dc_id()
     test_mode = await app.storage.test_mode()
     auth_key = await Auth(app, dc_id, test_mode).create() if dc_id != base_dc_id else await app.storage.auth_key()
     session = Session(app, dc_id, auth_key, test_mode, is_media=True)
     await session.start()
-    if dc_id != base_dc_id and exported_auth is not None:
-        await session.invoke(
-            raw.functions.auth.ImportAuthorization(
-                id=exported_auth.id,
-                bytes=exported_auth.bytes,
+    if dc_id != base_dc_id:
+        try:
+            exported_auth = await app.invoke(raw.functions.auth.ExportAuthorization(dc_id=dc_id))
+            await session.invoke(
+                raw.functions.auth.ImportAuthorization(
+                    id=exported_auth.id,
+                    bytes=exported_auth.bytes,
+                )
             )
-        )
+        except Exception as exc:
+            if _is_auth_bytes_invalid_error(exc):
+                raise ChunkedDownloadFallback("跨 DC 分块授权失败，已回退普通下载") from exc
+            raise
     return session
 
 
-async def _writer_loop(result_queue: asyncio.Queue, file_path: str, file_size: int, total_parts: int) -> None:
-    progress = create_progress_callback("下载中", sync_state)
+async def _writer_loop(result_queue: asyncio.Queue, file_path: str, file_size: int, total_parts: int, progress_label: str) -> None:
+    progress = create_progress_callback(progress_label, sync_state)
     completed = 0
     downloaded = 0
 
@@ -117,14 +138,19 @@ async def _writer_loop(result_queue: asyncio.Queue, file_path: str, file_size: i
 
 
 async def _download_chunk(session: Session, location, offset: int, limit: int):
-    response = await session.invoke(
-        raw.functions.upload.GetFile(
-            location=location,
-            offset=offset,
-            limit=limit,
-        ),
-        sleep_threshold=30,
-    )
+    try:
+        response = await session.invoke(
+            raw.functions.upload.GetFile(
+                location=location,
+                offset=offset,
+                limit=limit,
+            ),
+            sleep_threshold=30,
+        )
+    except Exception as exc:
+        if _is_limit_invalid_error(exc):
+            raise ChunkedDownloadFallback("当前文件不支持分块下载，已回退普通下载") from exc
+        raise
     if isinstance(response, raw.types.upload.FileCdnRedirect):
         raise ChunkedDownloadFallback("媒体下载命中 Telegram CDN，已回退普通下载")
     if not isinstance(response, raw.types.upload.File):
@@ -132,7 +158,15 @@ async def _download_chunk(session: Session, location, offset: int, limit: int):
     return bytes(response.bytes)
 
 
-async def download_media_in_chunks(app, msg, msg_type: str, file_path: str, worker_count: int = 4) -> str:
+async def download_media_in_chunks(
+    app,
+    msg,
+    msg_type: str,
+    file_path: str,
+    worker_count: int = 4,
+    *,
+    progress_label: str = "下载中",
+) -> str:
     request = build_chunk_download_request(msg, msg_type)
     total_parts = max(1, math.ceil(request.file_size / CHUNK_SIZE))
     worker_count = min(MAX_WORKERS, max(1, int(worker_count or 1)), total_parts)
@@ -144,11 +178,7 @@ async def download_media_in_chunks(app, msg, msg_type: str, file_path: str, work
     for part_index in range(total_parts):
         part_queue.put_nowait(part_index)
 
-    exported_auth = None
-    if request.dc_id != await app.storage.dc_id():
-        exported_auth = await app.invoke(raw.functions.auth.ExportAuthorization(dc_id=request.dc_id))
-
-    writer_task = asyncio.create_task(_writer_loop(result_queue, file_path, request.file_size, total_parts))
+    writer_task = asyncio.create_task(_writer_loop(result_queue, file_path, request.file_size, total_parts, progress_label))
 
     async def worker_loop(session: Session) -> None:
         while True:
@@ -182,7 +212,7 @@ async def download_media_in_chunks(app, msg, msg_type: str, file_path: str, work
 
     try:
         for _ in range(worker_count):
-            sessions.append(await _create_media_session(app, request.dc_id, exported_auth))
+            sessions.append(await _create_media_session(app, request.dc_id))
         worker_tasks = [asyncio.create_task(worker_loop(session)) for session in sessions]
         await asyncio.gather(*worker_tasks)
         await writer_task

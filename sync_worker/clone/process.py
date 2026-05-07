@@ -61,9 +61,10 @@ from .helpers import (
     _execute_with_clone_retry,
     _is_chat_forwards_restricted,
     _is_request_entity_too_large,
+    _is_topics_parse_error,
     _parse_retry_after_seconds,
 )
-from .raw_downloader import ChunkedDownloadFallback, download_media_in_chunks
+from .raw_downloader import ChunkedDownloadFallback, download_media_in_chunks, supports_chunked_download
 from ..json_import import process_json_sync
 
 
@@ -87,6 +88,58 @@ def _add_quote_kwargs(kwargs: dict, quote_data, reply_to_id):
         if quote_data.get("entities"):
             kwargs["quote_entities"] = quote_data["entities"]
     return kwargs
+
+
+def _set_group_download_status(first_id: int, completed: int, total: int, detail: str = ""):
+    suffix = f"\n{detail}" if detail else ""
+    sync_state["current_text"] = f"组下载 {completed}/{total} | 组首ID:{first_id}{suffix}"
+
+
+def _download_actor_label(app) -> str:
+    return bot_engine.describe_user_client(app, fallback="辅助账号")
+
+
+async def _download_clone_media_item(
+    app,
+    msg,
+    mode: str,
+    *,
+    clone_chunk_download_enabled: bool,
+    clone_chunk_download_workers: int,
+    progress_label: str,
+    normal_download_semaphore=None,
+):
+    item_type, _ = get_msg_meta(msg, mode)
+    download_target = _build_temp_download_path(msg, item_type)
+    _set_group_download_status(msg.id, 0, 1, f"准备下载 {item_type} | 消息ID:{msg.id}")
+    if clone_chunk_download_enabled and supports_chunked_download(item_type):
+        try:
+            return await download_media_in_chunks(
+                app,
+                msg,
+                item_type,
+                download_target,
+                worker_count=clone_chunk_download_workers,
+                progress_label=progress_label,
+            )
+        except ChunkedDownloadFallback as exc:
+            await db.add_msg_log("CLONE_CHUNK_FALLBACK", f"消息ID:{msg.id} | 已回退普通下载: {exc}")
+    async def _download_normally():
+        return await execute_with_network_retry(
+            lambda: app.download_media(
+                msg,
+                file_name=download_target,
+                progress=create_progress_callback(progress_label, sync_state),
+            ),
+            action_label=f"媒体下载 {msg.id}",
+            sync_state=sync_state,
+            log_tag="CLONE_NETWORK_RETRY",
+        )
+
+    if normal_download_semaphore is None:
+        return await _download_normally()
+    async with normal_download_semaphore:
+        return await _download_normally()
 
 
 async def _safe_get_messages(app, source_id, msg_ids):
@@ -301,34 +354,14 @@ async def sync_single_message(
                     if sync_state["stop_requested"]:
                         break
                     try:
-                        download_target = _build_temp_download_path(msg, msg_type)
-                        chunk_download_failed = False
-                        if clone_chunk_download_enabled:
-                            try:
-                                file_path = await download_media_in_chunks(
-                                    app,
-                                    msg,
-                                    msg_type,
-                                    download_target,
-                                    worker_count=clone_chunk_download_workers,
-                                )
-                            except ChunkedDownloadFallback as exc:
-                                chunk_download_failed = True
-                                await db.add_msg_log("CLONE_CHUNK_FALLBACK", f"消息ID:{msg.id} | 已回退普通下载: {exc}")
-                            except Exception as exc:
-                                chunk_download_failed = True
-                                await db.add_msg_log("CLONE_CHUNK_FALLBACK", f"消息ID:{msg.id} | 分块并发下载失败，已回退普通下载: {exc}")
-                        if not file_path or chunk_download_failed:
-                            file_path = await execute_with_network_retry(
-                                lambda: app.download_media(
-                                    msg,
-                                    file_name=download_target,
-                                    progress=create_progress_callback("下载中", sync_state),
-                                ),
-                                action_label=f"下载媒体 {msg.id}",
-                                sync_state=sync_state,
-                                log_tag="CLONE_NETWORK_RETRY",
-                            )
+                        file_path = await _download_clone_media_item(
+                            app,
+                            msg,
+                            mode,
+                            clone_chunk_download_enabled=clone_chunk_download_enabled,
+                            clone_chunk_download_workers=clone_chunk_download_workers,
+                            progress_label="下载中",
+                        )
                         if file_path:
                             break
                     except Exception as exc:
@@ -339,10 +372,11 @@ async def sync_single_message(
                         retry_after = _parse_retry_after_seconds(exc)
                         if retry_after is not None:
                             wait_seconds = retry_after + 1
-                            sync_state["current_text"] = f"等待重试\n下载阶段触发频控，需等待 {wait_seconds} 秒"
+                            actor_label = _download_actor_label(app)
+                            sync_state["current_text"] = f"等待重试\n{actor_label} 下载源媒体触发限流，需等待 {wait_seconds} 秒"
                             await db.add_msg_log(
                                 "CLONE_DOWNLOAD_WAIT",
-                                f"消息ID:{msg.id} | 下载阶段遇到频控，需等待 {wait_seconds} 秒后重试；切换发送身份无效，建议稍后继续",
+                                f"消息ID:{msg.id} | {actor_label} 下载源媒体时触发 Telegram 限流，需等待 {wait_seconds} 秒后重试",
                             )
                             await asyncio.sleep(wait_seconds)
                             continue
@@ -422,6 +456,24 @@ async def sync_single_message(
                             if actual_sender == "user":
                                 await db.add_msg_log("BOT_FALLBACK", f"原始:[{source_id}] 消息ID:{msg.id} | Bot 频控，已切换辅助账号继续发送")
                             continue
+                        if actual_sender == "bot" and bot_engine.should_disable_upload_bot_for_error(exc):
+                            await bot_engine.disable_upload_bot(client, str(exc))
+                            upload_target = await safe_execute(
+                                resolve_upload_target(
+                                    sender,
+                                    app,
+                                    [file_size],
+                                    allow_user_fallback=should_fallback_to_user(sender, clone_fallback_to_user),
+                                    wait_for_available_bot=not should_fallback_to_user(sender, clone_fallback_to_user),
+                                ),
+                                sync_state,
+                            )
+                            actual_sender = upload_target["sender"]
+                            client = upload_target["client"]
+                            parse_mode = upload_target["parse_mode"]
+                            if actual_sender == "user":
+                                await db.add_msg_log("BOT_FALLBACK", f"原始:[{source_id}] 消息ID:{msg.id} | 当前 Bot 已失效，已切换辅助账号继续发送")
+                            continue
                         await asyncio.sleep(2)
 
                 if sent_id is None and _clone_should_fallback_to_user(sender, clone_fallback_to_user) and actual_sender == "bot":
@@ -485,7 +537,22 @@ async def sync_single_message(
     await asyncio.sleep(safe_delay)
 
 
-async def sync_media_group(mode, sender, app, bot, source_id, target_id, group, safe_delay, force_send, hash_perturb=False, clone_fallback_to_user=True, include_external_source_header: bool = False):
+async def sync_media_group(
+    mode,
+    sender,
+    app,
+    bot,
+    source_id,
+    target_id,
+    group,
+    safe_delay,
+    force_send,
+    hash_perturb=False,
+    clone_fallback_to_user=True,
+    include_external_source_header: bool = False,
+    clone_chunk_download_enabled: bool = False,
+    clone_chunk_download_workers: int = 4,
+):
     if await update_state_and_check_skip(source_id, target_id, group[0].id, "[媒体组]", force_send=force_send):
         return
 
@@ -559,21 +626,29 @@ async def sync_media_group(mode, sender, app, bot, source_id, target_id, group, 
             if sync_state["stop_requested"]:
                 break
             try:
-                sem = asyncio.Semaphore(3)
+                sem = asyncio.Semaphore(clone_chunk_download_workers)
+                normal_download_semaphore = asyncio.Semaphore(1)
+                completed = 0
+                completed_lock = asyncio.Lock()
+                total_items = len(group)
 
                 async def dl_album_item(m_item, idx):
+                    nonlocal completed
                     async with sem:
                         item_type, _ = get_msg_meta(m_item, mode)
-                        return await execute_with_network_retry(
-                            lambda: app.download_media(
-                                m_item,
-                                file_name=_build_temp_download_path(m_item, item_type),
-                                progress=create_progress_callback(f"并发下载 [{idx}]", sync_state),
-                            ),
-                            action_label=f"媒体组下载 {m_item.id}",
-                            sync_state=sync_state,
-                            log_tag="CLONE_NETWORK_RETRY",
+                        path = await _download_clone_media_item(
+                            app,
+                            m_item,
+                            mode,
+                            clone_chunk_download_enabled=clone_chunk_download_enabled,
+                            clone_chunk_download_workers=clone_chunk_download_workers,
+                            progress_label=f"组内下载 [{idx}/{total_items}]",
+                            normal_download_semaphore=normal_download_semaphore,
                         )
+                        async with completed_lock:
+                            completed += 1
+                            _set_group_download_status(group[0].id, completed, total_items, f"已完成 {item_type} | 消息ID:{m_item.id}")
+                        return path
 
                 results = await asyncio.gather(
                     *[dl_album_item(item, index + 1) for index, item in enumerate(group)],
@@ -597,10 +672,11 @@ async def sync_media_group(mode, sender, app, bot, source_id, target_id, group, 
                         sync_state["stop_requested"] = True
                     elif retry_waits:
                         wait_seconds = max(retry_waits) + 1
-                        sync_state["current_text"] = f"等待重试\n媒体组下载触发频控，需等待 {wait_seconds} 秒"
+                        actor_label = _download_actor_label(app)
+                        sync_state["current_text"] = f"等待重试\n{actor_label} 下载源媒体组触发限流，需等待 {wait_seconds} 秒"
                         await db.add_msg_log(
                             "CLONE_GROUP_DOWNLOAD_WAIT",
-                            f"组首ID:{group[0].id} | 下载阶段遇到频控，需等待 {wait_seconds} 秒后重试；切换发送身份无效，建议稍后继续",
+                            f"组首ID:{group[0].id} | {actor_label} 下载源媒体组时触发 Telegram 限流，需等待 {wait_seconds} 秒后重试",
                         )
                         await asyncio.sleep(wait_seconds)
                     else:
@@ -708,12 +784,29 @@ async def sync_media_group(mode, sender, app, bot, source_id, target_id, group, 
                     await db.add_msg_log("CLONE_GROUP_CAPTION_REWRITE", f"原始:[{source_id}] 组首ID:{group[0].id} | 命中 {caption_rewrite_count} 个 caption 链接改写")
                 if quote_data and reply_to_id:
                     await db.add_msg_log("CLONE_QUOTE_GROUP_SEND", f"原始:[{source_id}] 组首ID:{group[0].id} | 已按引用回复发送媒体组")
+                await db.add_msg_log(
+                    "CLONE_GROUP_SEND",
+                    f"原始:[{source_id}] 组首ID:{group[0].id} | 目标:[{target_id}] 共 {len(group)} 项 | 同步成功",
+                )
                 break
             except Exception as exc:
                 if "STOP_REQUESTED" in str(exc):
                     raise
                 if isinstance(exc, SyncNetworkRetryExhaustedError):
                     raise
+                if actual_sender != "bot" and _is_topics_parse_error(exc):
+                    for orig_m in group:
+                        await record_success(source_id, target_id, orig_m.id, 0, force_send=force_send)
+                    await db.add_msg_log(
+                        "CLONE_TOPICS_COMPAT",
+                        f"原始:[{source_id}] 组首ID:{group[0].id} | 辅助账号发送后返回 topics 解析异常，已停止重试避免重复发送",
+                    )
+                    sent_group_success = True
+                    await db.add_msg_log(
+                        "CLONE_GROUP_SEND",
+                        f"原始:[{source_id}] 组首ID:{group[0].id} | 目标:[{target_id}] 共 {len(group)} 项 | 已发送，回包解析兼容处理",
+                    )
+                    break
                 if actual_sender == "bot" and _is_request_entity_too_large(exc):
                     bot_size_limit_hit = True
                     break
@@ -736,6 +829,24 @@ async def sync_media_group(mode, sender, app, bot, source_id, target_id, group, 
                     if actual_sender == "user":
                         await db.add_msg_log("BOT_FALLBACK", f"原始:[{source_id}] 组首ID:{group[0].id} | Bot 频控，已切换辅助账号继续发送")
                     continue
+                if actual_sender == "bot" and bot_engine.should_disable_upload_bot_for_error(exc):
+                    await bot_engine.disable_upload_bot(client, str(exc))
+                    upload_target = await safe_execute(
+                        resolve_upload_target(
+                            sender,
+                            app,
+                            file_sizes,
+                            allow_user_fallback=should_fallback_to_user(sender, clone_fallback_to_user),
+                            wait_for_available_bot=not should_fallback_to_user(sender, clone_fallback_to_user),
+                        ),
+                        sync_state,
+                    )
+                    actual_sender = upload_target["sender"]
+                    client = upload_target["client"]
+                    parse_mode = upload_target["parse_mode"]
+                    if actual_sender == "user":
+                        await db.add_msg_log("BOT_FALLBACK", f"原始:[{source_id}] 组首ID:{group[0].id} | 当前 Bot 已失效，已切换辅助账号继续发送")
+                    continue
                 await asyncio.sleep(2)
 
         if not sync_state["stop_requested"] and should_fallback_to_user(sender, clone_fallback_to_user) and actual_sender == "bot" and not sent_group_success:
@@ -757,12 +868,31 @@ async def sync_media_group(mode, sender, app, bot, source_id, target_id, group, 
                 f"上传媒体组: {len(downloaded_files)} 项",
                 total_bytes=sum(file_sizes),
             )
-            sent_msgs = await _execute_with_clone_retry(
-                lambda: app.send_media_group(**send_kwargs),
-                action_label=f"媒体组辅助回退 {first_id}",
-            )
-            for orig_m, new_m in zip(group, sent_msgs):
-                await record_success(source_id, target_id, orig_m.id, new_m.id, force_send=force_send)
+            try:
+                sent_msgs = await _execute_with_clone_retry(
+                    lambda: app.send_media_group(**send_kwargs),
+                    action_label=f"媒体组辅助回退 {first_id}",
+                )
+                for orig_m, new_m in zip(group, sent_msgs):
+                    await record_success(source_id, target_id, orig_m.id, new_m.id, force_send=force_send)
+                await db.add_msg_log(
+                    "CLONE_GROUP_SEND",
+                    f"原始:[{source_id}] 组首ID:{first_id} | 目标:[{target_id}] 共 {len(group)} 项 | 辅助账号回退发送成功",
+                )
+            except Exception as exc:
+                if _is_topics_parse_error(exc):
+                    for orig_m in group:
+                        await record_success(source_id, target_id, orig_m.id, 0, force_send=force_send)
+                    await db.add_msg_log(
+                        "CLONE_TOPICS_COMPAT",
+                        f"原始:[{source_id}] 组首ID:{first_id} | 辅助账号回退发送后返回 topics 解析异常，已停止重试避免重复发送",
+                    )
+                    await db.add_msg_log(
+                        "CLONE_GROUP_SEND",
+                        f"原始:[{source_id}] 组首ID:{first_id} | 目标:[{target_id}] 共 {len(group)} 项 | 已发送，回包解析兼容处理",
+                    )
+                else:
+                    raise
 
         for _, path in downloaded_files:
             try:
@@ -920,6 +1050,8 @@ async def process_master_sync(
                             hash_perturb=hash_perturb,
                             clone_fallback_to_user=clone_fallback_to_user,
                             include_external_source_header=include_external_source_header,
+                            clone_chunk_download_enabled=clone_chunk_download_enabled,
+                            clone_chunk_download_workers=clone_chunk_download_workers,
                         )
         else:
             await process_json_sync(

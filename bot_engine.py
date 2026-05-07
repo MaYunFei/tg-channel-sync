@@ -1,6 +1,7 @@
 ﻿import asyncio
 import logging
 import os
+import re
 import time
 from math import ceil
 
@@ -57,6 +58,7 @@ user_auth_state = {
     "send_code_available_at": 0.0,
 }
 upload_bot_rr_index = 0
+RETRY_AFTER_RE = re.compile(r"retry after\s+(?P<seconds>\d+)", re.IGNORECASE)
 
 MSG_TYPES = ["photo", "video", "animation", "audio", "voice", "sticker", "document"]
 REALTIME_REUPLOAD_TYPES = {"photo", "video", "animation", "audio", "voice", "sticker", "document"}
@@ -118,6 +120,8 @@ def _build_upload_bot_pool(primary_bot, primary_token: str):
                 "window_started_at": 0.0,
                 "uploaded_bytes": 0,
                 "cooldown_until": 0.0,
+                "disabled": False,
+                "disabled_reason": "",
             }
         )
 
@@ -205,6 +209,60 @@ def _reset_window_if_needed(bot_state: dict, now: float, window_seconds: float):
         bot_state["uploaded_bytes"] = 0
 
 
+def _window_reset_at(bot_state: dict, window_seconds: float) -> float:
+    started_at = float(bot_state.get("window_started_at", 0.0) or 0.0)
+    if started_at <= 0:
+        return 0.0
+    return started_at + window_seconds
+
+
+def parse_retry_after_seconds(exc: Exception) -> int | None:
+    match = RETRY_AFTER_RE.search(str(exc or ""))
+    if not match:
+        return None
+    try:
+        return int(match.group("seconds"))
+    except (TypeError, ValueError):
+        return None
+
+
+def should_disable_upload_bot_for_error(exc: Exception) -> bool:
+    text = str(exc or "").lower()
+    return any(
+        pattern in text
+        for pattern in (
+            "unauthorized",
+            "invalid token",
+            "bot token is invalid",
+            "token is invalid",
+        )
+    )
+
+
+def describe_user_client(client, fallback: str = "辅助账号") -> str:
+    me = getattr(client, "me", None)
+    if me is None:
+        return fallback
+    username = str(getattr(me, "username", "") or "").strip()
+    if username:
+        return f"{fallback} @{username}"
+    first_name = str(getattr(me, "first_name", "") or "").strip()
+    last_name = str(getattr(me, "last_name", "") or "").strip()
+    full_name = " ".join(part for part in (first_name, last_name) if part).strip()
+    if full_name:
+        return f"{fallback} {full_name}"
+    return fallback
+
+
+def describe_upload_bot(client, fallback: str = "机器人") -> str:
+    for bot_state in upload_bots:
+        if bot_state["client"] == client:
+            return bot_state["label"]
+    if aiogram_bot is not None and client == aiogram_bot:
+        return "主Bot"
+    return fallback
+
+
 async def acquire_upload_bot(file_size: int, wait_if_unavailable: bool = True):
     global upload_bot_rr_index
     if not upload_bots:
@@ -216,35 +274,41 @@ async def acquire_upload_bot(file_size: int, wait_if_unavailable: bool = True):
     rate_limit_enabled = bool(sync_cfg.get("bot_rate_limit_enabled", False))
     threshold_bytes = int(float(sync_cfg.get("bot_rate_limit_gb", 10) or 10) * 1024 * 1024 * 1024)
     window_seconds = float(sync_cfg.get("bot_rate_limit_window_hours", 24) or 24) * 3600
-    cooldown_seconds = float(sync_cfg.get("bot_rate_limit_cooldown_minutes", 300) or 300) * 60
 
     while True:
         now = time.time()
         earliest_ready_at = None
         total = len(upload_bots)
+        disabled_count = 0
+        blocked_labels = []
 
         for offset in range(total):
             idx = (upload_bot_rr_index + offset) % total
             bot_state = upload_bots[idx]
+            if bot_state.get("disabled"):
+                disabled_count += 1
+                continue
             if rate_limit_enabled:
                 _reset_window_if_needed(bot_state, now, window_seconds)
             if bot_state["cooldown_until"] > now:
                 earliest_ready_at = bot_state["cooldown_until"] if earliest_ready_at is None else min(earliest_ready_at, bot_state["cooldown_until"])
+                blocked_labels.append(f"{bot_state['label']}({max(1, int(bot_state['cooldown_until'] - now))}秒)")
                 continue
-            if rate_limit_enabled and threshold_bytes > 0 and bot_state["uploaded_bytes"] + file_size > threshold_bytes:
-                if bot_state["cooldown_until"] <= now:
-                    bot_state["cooldown_until"] = now + cooldown_seconds
-                    wait_minutes = max(1, ceil(cooldown_seconds / 60))
-                    await db.add_msg_log("BOT_ROTATE", f"{bot_state['label']} 达到上传阈值，暂停 {wait_minutes} 分钟并轮换下一个 bot")
-                earliest_ready_at = bot_state["cooldown_until"] if earliest_ready_at is None else min(earliest_ready_at, bot_state["cooldown_until"])
+            if rate_limit_enabled and threshold_bytes > 0 and bot_state["uploaded_bytes"] >= threshold_bytes:
+                blocked_until = max(bot_state["cooldown_until"], _window_reset_at(bot_state, window_seconds))
+                earliest_ready_at = blocked_until if earliest_ready_at is None else min(earliest_ready_at, blocked_until)
+                blocked_labels.append(f"{bot_state['label']}({max(1, int(blocked_until - now))}秒)")
                 continue
             upload_bot_rr_index = (idx + 1) % total
             return {"client": bot_state["client"], "label": bot_state["label"]}
 
+        if disabled_count == total:
+            raise RuntimeError("全部上传 Bot 均已失效，请检查 BOT_TOKEN / extra BOT_TOKEN 配置")
         if not wait_if_unavailable:
             return None
         wait_seconds = max(1, int((earliest_ready_at or (now + 5)) - now))
-        await db.add_msg_log("BOT_WAIT", f"全部 bot 暂时不可用，等待 {wait_seconds} 秒后继续；如需立即继续，可切换为辅助账号发送")
+        detail = f"：{'、'.join(blocked_labels)}" if blocked_labels else ""
+        await db.add_msg_log("BOT_WAIT", f"机器人上传池暂时不可用{detail}，等待 {wait_seconds} 秒后继续；如需立即继续，可切换为辅助账号发送")
         await asyncio.sleep(wait_seconds)
 
 
@@ -252,11 +316,21 @@ async def note_upload_success(bot_client, file_size: int):
     if not upload_bots:
         return
     now = time.time()
-    window_seconds = float(get_config()["sync"].get("bot_rate_limit_window_hours", 24) or 24) * 3600
+    sync_cfg = get_config()["sync"]
+    rate_limit_enabled = bool(sync_cfg.get("bot_rate_limit_enabled", False))
+    threshold_bytes = int(float(sync_cfg.get("bot_rate_limit_gb", 10) or 10) * 1024 * 1024 * 1024)
+    window_seconds = float(sync_cfg.get("bot_rate_limit_window_hours", 24) or 24) * 3600
+    cooldown_seconds = float(sync_cfg.get("bot_rate_limit_cooldown_minutes", 300) or 300) * 60
     for bot_state in upload_bots:
         if bot_state["client"] == bot_client:
             _reset_window_if_needed(bot_state, now, window_seconds)
+            previous_bytes = max(0, int(bot_state.get("uploaded_bytes", 0) or 0))
             bot_state["uploaded_bytes"] += max(0, int(file_size))
+            if rate_limit_enabled and threshold_bytes > 0 and previous_bytes < threshold_bytes <= bot_state["uploaded_bytes"]:
+                lock_until = max(now + cooldown_seconds, _window_reset_at(bot_state, window_seconds))
+                bot_state["cooldown_until"] = max(float(bot_state.get("cooldown_until", 0.0) or 0.0), lock_until)
+                wait_minutes = max(1, ceil(max(0.0, lock_until - now) / 60))
+                await db.add_msg_log("BOT_ROTATE", f"{bot_state['label']} 达到上传阈值，暂停 {wait_minutes} 分钟并轮换下一个 bot")
             break
 
 
@@ -271,6 +345,23 @@ async def mark_upload_bot_cooldown(bot_client, cooldown_seconds: int, reason: st
         bot_state["cooldown_until"] = max(float(bot_state.get("cooldown_until", 0.0) or 0.0), now + wait_seconds)
         detail = f" | {reason}" if reason else ""
         await db.add_msg_log("BOT_ROTATE", f"{bot_state['label']} 遇到频控，冷却 {wait_seconds} 秒并轮换下一个 bot{detail}")
+        return bot_state["label"]
+    return None
+
+
+async def disable_upload_bot(bot_client, reason: str = ""):
+    if not upload_bots or bot_client is None:
+        return None
+    detail = str(reason or "").strip()
+    for bot_state in upload_bots:
+        if bot_state["client"] != bot_client:
+            continue
+        if bot_state.get("disabled"):
+            return bot_state["label"]
+        bot_state["disabled"] = True
+        bot_state["disabled_reason"] = detail
+        suffix = f" | {detail}" if detail else ""
+        await db.add_msg_log("BOT_DISABLE", f"{bot_state['label']} 因认证异常已退出轮换池{suffix}")
         return bot_state["label"]
     return None
 
@@ -362,6 +453,70 @@ async def _send_realtime_text_with_identity(target_id, text_html, reply_to_id, q
     return sent.message_id if sender == "bot" else sent.id
 
 
+def _realtime_should_fallback_to_user(options: dict) -> bool:
+    return should_fallback_to_user(options["sender"], options["fallback_to_user"])
+
+
+async def _resolve_realtime_upload_target(options: dict, file_sizes: list[int]):
+    return await resolve_upload_target(
+        options["sender"],
+        pyro_user_app,
+        file_sizes,
+        allow_user_fallback=_realtime_should_fallback_to_user(options),
+        wait_for_available_bot=not _realtime_should_fallback_to_user(options),
+    )
+
+
+async def _send_realtime_media_via_user(target_id, msg_type, file_path, text_html, reply_to_id, quote_data, label_prefix):
+    if not getattr(pyro_user_app, "is_initialized", False):
+        raise RuntimeError("实时同步使用辅助账号发送前，请先完成辅助账号登录")
+    file_size = os.path.getsize(file_path)
+    file_label = format_upload_label(msg_type, file_path)
+    tracker = UploadProgressTracker(label_prefix, file_size)
+    sent = await execute_with_network_retry(
+        lambda: dynamic_send(
+            pyro_user_app,
+            msg_type,
+            target_id,
+            file_path,
+            text_html,
+            ParseMode.HTML,
+            reply_to_message_id=reply_to_id,
+            quote_data=quote_data if reply_to_id else None,
+            progress=build_pyro_progress_callback(tracker, file_label, total_bytes=file_size),
+        ),
+        action_label=label_prefix,
+        log_tag="REALTIME_NETWORK_RETRY",
+    )
+    return sent.id
+
+
+async def _send_realtime_media_group_via_user(target_id, downloaded_files, captions, reply_to_id, quote_data, action_label):
+    if not getattr(pyro_user_app, "is_initialized", False):
+        raise RuntimeError("实时同步使用辅助账号发送前，请先完成辅助账号登录")
+    total_size = sum(os.path.getsize(path) for _, path, _ in downloaded_files)
+    tracker = UploadProgressTracker("实时上传媒体组 [辅助账号回退]", total_size)
+    media = build_user_media_group(downloaded_files, captions, {})
+    kwargs = {"chat_id": target_id, "media": media}
+    if reply_to_id:
+        kwargs["reply_to_message_id"] = reply_to_id
+    if quote_data and reply_to_id:
+        kwargs["quote_text"] = quote_data["text"]
+        if quote_data.get("entities"):
+            kwargs["quote_entities"] = quote_data["entities"]
+    kwargs["progress"] = build_pyro_progress_callback(
+        tracker,
+        f"实时上传媒体组: {len(downloaded_files)} 项",
+        total_bytes=total_size,
+    )
+    sent_msgs = await execute_with_network_retry(
+        lambda: pyro_user_app.send_media_group(**kwargs),
+        action_label=action_label,
+        log_tag="REALTIME_NETWORK_RETRY",
+    )
+    return [sent.id for sent in sent_msgs]
+
+
 async def _send_realtime_media_upload(source_id, target_id, message, msg_type, text_html, reply_to_id, quote_data, options):
     file_path = await _download_realtime_media(message, msg_type)
     if not file_path:
@@ -369,61 +524,67 @@ async def _send_realtime_media_upload(source_id, target_id, message, msg_type, t
     try:
         file_path = await prepare_media_for_send(file_path, msg_type, message.message_id, options["hash_perturb"])
         file_size = os.path.getsize(file_path)
-        upload_target = await resolve_upload_target(
-            options["sender"],
-            pyro_user_app,
-            [file_size],
-            allow_user_fallback=should_fallback_to_user(options["sender"], options["fallback_to_user"]),
-            wait_for_available_bot=not should_fallback_to_user(options["sender"], options["fallback_to_user"]),
-        )
-        actual_sender = upload_target["sender"]
-        client = upload_target["client"]
-        if actual_sender == "user" and not getattr(client, "is_initialized", False):
-            raise RuntimeError("实时同步使用辅助账号发送前，请先完成辅助账号登录")
-        file_label = format_upload_label(msg_type, file_path)
-        tracker = UploadProgressTracker(f"实时上传 [{upload_target['label']}]", file_size)
-        media_arg = ProgressFSInputFile(file_path, tracker, file_label) if actual_sender == "bot" else file_path
-        sent = await execute_with_network_retry(
-            lambda: dynamic_send(
-                client,
-                msg_type,
-                target_id,
-                media_arg,
-                text_html,
-                upload_target["parse_mode"],
-                reply_to_message_id=reply_to_id,
-                quote_data=quote_data if reply_to_id else None,
-                progress=build_pyro_progress_callback(tracker, file_label, total_bytes=file_size) if actual_sender != "bot" else None,
-            ),
-            action_label=f"实时媒体发送 {message.message_id}",
-            log_tag="REALTIME_NETWORK_RETRY",
-        )
-        if actual_sender == "bot":
-            await note_upload_success(client, file_size)
-        return sent.message_id if actual_sender == "bot" else sent.id
-    except Exception:
-        if options["sender"] == "bot" and options["fallback_to_user"] and getattr(pyro_user_app, "is_initialized", False):
-            await db.add_msg_log("BOT_FALLBACK", f"实时同步 消息ID:{message.message_id} | Bot 上传失败，已回退辅助账号重传")
-            file_size = os.path.getsize(file_path)
-            file_label = format_upload_label(msg_type, file_path)
-            tracker = UploadProgressTracker("实时上传 [辅助账号回退]", file_size)
-            sent = await execute_with_network_retry(
-                lambda: dynamic_send(
-                    pyro_user_app,
-                    msg_type,
+        upload_target = await _resolve_realtime_upload_target(options, [file_size])
+        while True:
+            actual_sender = upload_target["sender"]
+            client = upload_target["client"]
+            if actual_sender == "user":
+                return await _send_realtime_media_via_user(
                     target_id,
+                    msg_type,
                     file_path,
                     text_html,
-                    ParseMode.HTML,
-                    reply_to_message_id=reply_to_id,
-                    quote_data=quote_data if reply_to_id else None,
-                    progress=build_pyro_progress_callback(tracker, file_label, total_bytes=file_size),
-                ),
-                action_label=f"实时媒体辅助回退 {message.message_id}",
-                log_tag="REALTIME_NETWORK_RETRY",
-            )
-            return sent.id
-        raise
+                    reply_to_id,
+                    quote_data,
+                    f"实时媒体辅助回退 {message.message_id}",
+                )
+
+            file_label = format_upload_label(msg_type, file_path)
+            tracker = UploadProgressTracker(f"实时上传 [{upload_target['label']}]", file_size)
+            media_arg = ProgressFSInputFile(file_path, tracker, file_label)
+            try:
+                sent = await execute_with_network_retry(
+                    lambda: dynamic_send(
+                        client,
+                        msg_type,
+                        target_id,
+                        media_arg,
+                        text_html,
+                        upload_target["parse_mode"],
+                        reply_to_message_id=reply_to_id,
+                        quote_data=quote_data if reply_to_id else None,
+                    ),
+                    action_label=f"实时媒体发送 {message.message_id}",
+                    log_tag="REALTIME_NETWORK_RETRY",
+                )
+                await note_upload_success(client, file_size)
+                return sent.message_id
+            except Exception as exc:
+                retry_after = parse_retry_after_seconds(exc)
+                if retry_after is not None:
+                    await mark_upload_bot_cooldown(client, retry_after + 1, f"REALTIME 消息ID:{message.message_id}")
+                    upload_target = await _resolve_realtime_upload_target(options, [file_size])
+                    if upload_target["sender"] == "user":
+                        await db.add_msg_log("BOT_FALLBACK", f"实时同步 消息ID:{message.message_id} | Bot 频控，已切换辅助账号重传")
+                    continue
+                if should_disable_upload_bot_for_error(exc):
+                    await disable_upload_bot(client, str(exc))
+                    upload_target = await _resolve_realtime_upload_target(options, [file_size])
+                    if upload_target["sender"] == "user":
+                        await db.add_msg_log("BOT_FALLBACK", f"实时同步 消息ID:{message.message_id} | 当前 Bot 已失效，已切换辅助账号重传")
+                    continue
+                if _realtime_should_fallback_to_user(options) and getattr(pyro_user_app, "is_initialized", False):
+                    await db.add_msg_log("BOT_FALLBACK", f"实时同步 消息ID:{message.message_id} | Bot 上传失败，已回退辅助账号重传")
+                    return await _send_realtime_media_via_user(
+                        target_id,
+                        msg_type,
+                        file_path,
+                        text_html,
+                        reply_to_id,
+                        quote_data,
+                        f"实时媒体辅助回退 {message.message_id}",
+                    )
+                raise
     finally:
         try:
             os.remove(file_path)
@@ -442,54 +603,57 @@ async def _send_realtime_media_group_upload(source_id, target_id, group, caption
             path = await prepare_media_for_send(path, item_type, item.message_id, options["hash_perturb"])
             downloaded_files.append((item, path, "video" if item_type == "animation" else item_type))
         file_sizes = [os.path.getsize(path) for _, path, _ in downloaded_files]
-        upload_target = await resolve_upload_target(
-            options["sender"],
-            pyro_user_app,
-            file_sizes,
-            allow_user_fallback=should_fallback_to_user(options["sender"], options["fallback_to_user"]),
-            wait_for_available_bot=not should_fallback_to_user(options["sender"], options["fallback_to_user"]),
-        )
-        actual_sender = upload_target["sender"]
-        client = upload_target["client"]
-        if actual_sender == "user" and not getattr(client, "is_initialized", False):
-            raise RuntimeError("实时同步使用辅助账号发送前，请先完成辅助账号登录")
-        if actual_sender == "bot":
+        upload_target = await _resolve_realtime_upload_target(options, file_sizes)
+        while True:
+            actual_sender = upload_target["sender"]
+            client = upload_target["client"]
+            if actual_sender == "user":
+                return await _send_realtime_media_group_via_user(
+                    target_id,
+                    downloaded_files,
+                    captions,
+                    reply_to_id,
+                    quote_data,
+                    f"实时媒体组辅助回退 {group[0].message_id}",
+                )
+
             _, media = build_bot_media_group(downloaded_files, captions, {}, sum(file_sizes), upload_target["label"])
-        else:
-            tracker = UploadProgressTracker(f"实时上传媒体组 [{upload_target['label']}]", sum(file_sizes))
-            media = build_user_media_group(downloaded_files, captions, {})
-        kwargs = {"chat_id": target_id, "media": media}
-        if reply_to_id:
-            kwargs["reply_to_message_id"] = reply_to_id
-        if quote_data and reply_to_id and actual_sender == "user":
-            kwargs["quote_text"] = quote_data["text"]
-            if quote_data.get("entities"):
-                kwargs["quote_entities"] = quote_data["entities"]
-        if actual_sender == "user":
-            kwargs["progress"] = build_pyro_progress_callback(
-                tracker,
-                f"实时上传媒体组: {len(downloaded_files)} 项",
-                total_bytes=sum(file_sizes),
-            )
-        sent_msgs = await execute_with_network_retry(
-            lambda: client.send_media_group(**kwargs),
-            action_label=f"实时媒体组发送 {group[0].message_id}",
-            log_tag="REALTIME_NETWORK_RETRY",
-        )
-        if actual_sender == "bot":
-            await note_upload_success(client, sum(file_sizes))
-        return [sent.message_id if actual_sender == "bot" else sent.id for sent in sent_msgs]
-    except Exception:
-        if options["sender"] == "bot" and options["fallback_to_user"] and getattr(pyro_user_app, "is_initialized", False):
-            await db.add_msg_log("BOT_FALLBACK", f"实时同步 组首ID:{group[0].message_id} | Bot 上传失败，已回退辅助账号重传")
-            media = build_user_media_group(downloaded_files, captions, {})
-            sent_msgs = await execute_with_network_retry(
-                lambda: pyro_user_app.send_media_group(chat_id=target_id, media=media),
-                action_label=f"实时媒体组辅助回退 {group[0].message_id}",
-                log_tag="REALTIME_NETWORK_RETRY",
-            )
-            return [sent.id for sent in sent_msgs]
-        raise
+            kwargs = {"chat_id": target_id, "media": media}
+            if reply_to_id:
+                kwargs["reply_to_message_id"] = reply_to_id
+            try:
+                sent_msgs = await execute_with_network_retry(
+                    lambda: client.send_media_group(**kwargs),
+                    action_label=f"实时媒体组发送 {group[0].message_id}",
+                    log_tag="REALTIME_NETWORK_RETRY",
+                )
+                await note_upload_success(client, sum(file_sizes))
+                return [sent.message_id for sent in sent_msgs]
+            except Exception as exc:
+                retry_after = parse_retry_after_seconds(exc)
+                if retry_after is not None:
+                    await mark_upload_bot_cooldown(client, retry_after + 1, f"REALTIME 组首ID:{group[0].message_id}")
+                    upload_target = await _resolve_realtime_upload_target(options, file_sizes)
+                    if upload_target["sender"] == "user":
+                        await db.add_msg_log("BOT_FALLBACK", f"实时同步 组首ID:{group[0].message_id} | Bot 频控，已切换辅助账号重传")
+                    continue
+                if should_disable_upload_bot_for_error(exc):
+                    await disable_upload_bot(client, str(exc))
+                    upload_target = await _resolve_realtime_upload_target(options, file_sizes)
+                    if upload_target["sender"] == "user":
+                        await db.add_msg_log("BOT_FALLBACK", f"实时同步 组首ID:{group[0].message_id} | 当前 Bot 已失效，已切换辅助账号重传")
+                    continue
+                if _realtime_should_fallback_to_user(options) and getattr(pyro_user_app, "is_initialized", False):
+                    await db.add_msg_log("BOT_FALLBACK", f"实时同步 组首ID:{group[0].message_id} | Bot 上传失败，已回退辅助账号重传")
+                    return await _send_realtime_media_group_via_user(
+                        target_id,
+                        downloaded_files,
+                        captions,
+                        reply_to_id,
+                        quote_data,
+                        f"实时媒体组辅助回退 {group[0].message_id}",
+                    )
+                raise
     finally:
         for _, path, _ in downloaded_files:
             try:

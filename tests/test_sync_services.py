@@ -248,13 +248,13 @@ class SyncServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_sync_single_message_clone_uses_chunk_downloader_when_enabled(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            download_path = Path(temp_dir) / "photo.jpg"
-            download_path.write_bytes(b"photo-bytes")
-            msg = type("Msg", (), {"id": 7, "text": None, "caption": None, "photo": type("Photo", (), {"file_name": "demo.jpg"})()})()
+            download_path = Path(temp_dir) / "demo.bin"
+            download_path.write_bytes(b"doc-bytes")
+            msg = type("Msg", (), {"id": 7, "text": None, "caption": None, "document": type("Document", (), {"file_name": "demo.bin"})()})()
             fake_app = type("FakeApp", (), {"download_media": AsyncMock()})()
             fake_sent = type("Sent", (), {"id": 101})()
 
-            with patch("sync_worker.clone.process.get_msg_meta", return_value=("photo", "sync_photo")), \
+            with patch("sync_worker.clone.process.get_msg_meta", return_value=("document", "sync_document")), \
                  patch("sync_worker.clone.process.db.apply_message_filters", AsyncMock(return_value=(False, ""))), \
                  patch("sync_worker.clone.process.update_state_and_check_skip", AsyncMock(return_value=False)), \
                  patch("sync_worker.clone.process.resolve_reply_target", AsyncMock(return_value=None)), \
@@ -287,6 +287,68 @@ class SyncServiceTests(unittest.IsolatedAsyncioTestCase):
             mock_chunk_download.assert_awaited_once()
             fake_app.download_media.assert_not_awaited()
             mock_record_success.assert_awaited_once_with(-100123, -100456, 7, 101, force_send=False)
+
+    async def test_download_clone_media_item_falls_back_to_normal_download_for_known_chunk_fallback(self):
+        fake_app = type("FakeApp", (), {"download_media": AsyncMock(return_value="normal.bin")})()
+        msg = type("Msg", (), {"id": 9, "document": type("Doc", (), {"file_id": "x", "file_size": 10})()})()
+
+        with patch("sync_worker.clone.process.get_msg_meta", return_value=("document", "sync_document")), \
+             patch("sync_worker.clone.process._build_temp_download_path", return_value="temp.bin"), \
+             patch("sync_worker.clone.process.download_media_in_chunks", AsyncMock(side_effect=history.ChunkedDownloadFallback("LIMIT_INVALID"))), \
+             patch("sync_worker.clone.process.execute_with_network_retry", AsyncMock(return_value="normal.bin")) as mock_download, \
+             patch("sync_worker.clone.process.db.add_msg_log", AsyncMock()) as mock_add_msg_log:
+            result = await history._download_clone_media_item(
+                fake_app,
+                msg,
+                "clone",
+                clone_chunk_download_enabled=True,
+                clone_chunk_download_workers=4,
+                progress_label="组内下载 [1/2]",
+            )
+
+        self.assertEqual(result, "normal.bin")
+        mock_download.assert_awaited_once()
+        mock_add_msg_log.assert_awaited_once()
+
+    async def test_download_clone_media_item_propagates_non_fallback_chunk_errors(self):
+        fake_app = type("FakeApp", (), {"download_media": AsyncMock()})()
+        msg = type("Msg", (), {"id": 11, "video": type("Video", (), {"file_id": "x", "file_size": 10})()})()
+
+        with patch("sync_worker.clone.process.get_msg_meta", return_value=("video", "sync_video")), \
+             patch("sync_worker.clone.process._build_temp_download_path", return_value="temp.bin"), \
+             patch("sync_worker.clone.process.download_media_in_chunks", AsyncMock(side_effect=RuntimeError("network boom"))):
+            with self.assertRaises(RuntimeError):
+                await history._download_clone_media_item(
+                    fake_app,
+                    msg,
+                    "clone",
+                    clone_chunk_download_enabled=True,
+                    clone_chunk_download_workers=4,
+                    progress_label="组内下载 [1/2]",
+                )
+
+    async def test_download_clone_media_item_skips_chunk_attempt_for_unsupported_type(self):
+        fake_app = type("FakeApp", (), {"download_media": AsyncMock(return_value="normal.bin")})()
+        msg = type("Msg", (), {"id": 12, "sticker": object()})()
+
+        with patch("sync_worker.clone.process.get_msg_meta", return_value=("sticker", "sync_sticker")), \
+             patch("sync_worker.clone.process._build_temp_download_path", return_value="temp.bin"), \
+             patch("sync_worker.clone.process.download_media_in_chunks", AsyncMock()) as mock_chunk_download, \
+             patch("sync_worker.clone.process.execute_with_network_retry", AsyncMock(return_value="normal.bin")) as mock_download, \
+             patch("sync_worker.clone.process.db.add_msg_log", AsyncMock()) as mock_add_msg_log:
+            result = await history._download_clone_media_item(
+                fake_app,
+                msg,
+                "clone",
+                clone_chunk_download_enabled=True,
+                clone_chunk_download_workers=4,
+                progress_label="组内下载 [1/2]",
+            )
+
+        self.assertEqual(result, "normal.bin")
+        mock_chunk_download.assert_not_awaited()
+        mock_download.assert_awaited_once()
+        mock_add_msg_log.assert_not_awaited()
 
     async def test_process_master_sync_logs_failed_summary_for_network_abort(self):
         async def _raise_with_progress(*args, **kwargs):
@@ -332,6 +394,84 @@ class SyncServiceTests(unittest.IsolatedAsyncioTestCase):
                 label = await bot_engine.mark_upload_bot_cooldown(fake_client, 12, "test")
             self.assertEqual(label, "Bot#2")
             self.assertGreater(bot_engine.upload_bots[0]["cooldown_until"], 0.0)
+            mock_add_msg_log.assert_awaited()
+        finally:
+            bot_engine.upload_bots = original_upload_bots
+
+    async def test_acquire_upload_bot_allows_single_upload_to_cross_threshold(self):
+        fake_client = object()
+        original_upload_bots = bot_engine.upload_bots
+        original_rr_index = bot_engine.upload_bot_rr_index
+        bot_engine.upload_bots = [{
+            "client": fake_client,
+            "label": "Bot#1",
+            "window_started_at": 1000.0,
+            "uploaded_bytes": 0,
+            "cooldown_until": 0.0,
+            "disabled": False,
+            "disabled_reason": "",
+        }]
+        bot_engine.upload_bot_rr_index = 0
+        try:
+            with patch("bot_engine.get_config", return_value={"sync": {
+                "bot_rate_limit_enabled": True,
+                "bot_rate_limit_gb": 10,
+                "bot_rate_limit_window_hours": 24,
+                "bot_rate_limit_cooldown_minutes": 300,
+            }}), \
+                 patch("bot_engine.time.time", return_value=1200.0):
+                selected = await bot_engine.acquire_upload_bot(15 * 1024 * 1024 * 1024, wait_if_unavailable=False)
+            self.assertEqual(selected["client"], fake_client)
+        finally:
+            bot_engine.upload_bots = original_upload_bots
+            bot_engine.upload_bot_rr_index = original_rr_index
+
+    async def test_note_upload_success_locks_bot_after_threshold_reached(self):
+        fake_client = object()
+        original_upload_bots = bot_engine.upload_bots
+        bot_engine.upload_bots = [{
+            "client": fake_client,
+            "label": "Bot#1",
+            "window_started_at": 1000.0,
+            "uploaded_bytes": 9 * 1024 * 1024 * 1024,
+            "cooldown_until": 0.0,
+            "disabled": False,
+            "disabled_reason": "",
+        }]
+        try:
+            with patch("bot_engine.get_config", return_value={"sync": {
+                "bot_rate_limit_enabled": True,
+                "bot_rate_limit_gb": 10,
+                "bot_rate_limit_window_hours": 1,
+                "bot_rate_limit_cooldown_minutes": 5,
+            }}), \
+                 patch("bot_engine.time.time", return_value=1200.0), \
+                 patch("bot_engine.db.add_msg_log", AsyncMock()) as mock_add_msg_log:
+                await bot_engine.note_upload_success(fake_client, 2 * 1024 * 1024 * 1024)
+            self.assertGreaterEqual(bot_engine.upload_bots[0]["uploaded_bytes"], 11 * 1024 * 1024 * 1024)
+            self.assertEqual(bot_engine.upload_bots[0]["cooldown_until"], 4600.0)
+            mock_add_msg_log.assert_awaited()
+        finally:
+            bot_engine.upload_bots = original_upload_bots
+
+    async def test_disable_upload_bot_marks_state_and_logs(self):
+        fake_client = object()
+        original_upload_bots = bot_engine.upload_bots
+        bot_engine.upload_bots = [{
+            "client": fake_client,
+            "label": "Bot#3",
+            "window_started_at": 0.0,
+            "uploaded_bytes": 0,
+            "cooldown_until": 0.0,
+            "disabled": False,
+            "disabled_reason": "",
+        }]
+        try:
+            with patch("bot_engine.db.add_msg_log", AsyncMock()) as mock_add_msg_log:
+                label = await bot_engine.disable_upload_bot(fake_client, "Unauthorized")
+            self.assertEqual(label, "Bot#3")
+            self.assertTrue(bot_engine.upload_bots[0]["disabled"])
+            self.assertEqual(bot_engine.upload_bots[0]["disabled_reason"], "Unauthorized")
             mock_add_msg_log.assert_awaited()
         finally:
             bot_engine.upload_bots = original_upload_bots

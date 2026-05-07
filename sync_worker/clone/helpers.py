@@ -26,6 +26,11 @@ def _is_request_entity_too_large(exc: Exception) -> bool:
     return "request entity too large" in str(exc).lower()
 
 
+def _is_topics_parse_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "topics" in text and "messages.__init__" in text
+
+
 def _is_chat_forwards_restricted(exc: Exception) -> bool:
     text = str(exc).lower()
     return "chat_forwards_restricted" in text or "restricts forwarding content" in text

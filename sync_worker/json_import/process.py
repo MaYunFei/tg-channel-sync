@@ -262,6 +262,19 @@ async def send_json_media_group(
                         sent_group = await _send_json_group_via_user(group, target_id, rewritten_captions, file_entries, reply_to_id)
                         break
                     continue
+                if bot_engine.should_disable_upload_bot_for_error(exc):
+                    await bot_engine.disable_upload_bot(upload_target["client"], str(exc))
+                    upload_target = await _select_json_upload_target(
+                        sender,
+                        file_sizes,
+                        clone_fallback_to_user=clone_fallback_to_user,
+                        wait_for_available_bot=not _json_should_fallback_to_user(sender, clone_fallback_to_user),
+                    )
+                    if upload_target["sender"] == "user":
+                        await db.add_msg_log("JSON_FALLBACK", f"组首消息ID:{first_id} | 当前 Bot 已失效，已切换辅助账号发送媒体组")
+                        sent_group = await _send_json_group_via_user(group, target_id, rewritten_captions, file_entries, reply_to_id)
+                        break
+                    continue
                 raise
         if sent_group is None and not sync_state["stop_requested"] and _json_should_fallback_to_user(sender, clone_fallback_to_user):
             await db.add_msg_log("JSON_FALLBACK", f"组首消息ID:{first_id} | Bot 发送失败，已回退辅助账号发送媒体组")
@@ -543,6 +556,28 @@ async def process_json_sync(
                                                 )
                                                 break
                                             continue
+                                        if bot_engine.should_disable_upload_bot_for_error(exc):
+                                            await bot_engine.disable_upload_bot(upload_target["client"], str(exc))
+                                            upload_target = await _select_json_upload_target(
+                                                sender,
+                                                [file_size],
+                                                clone_fallback_to_user=clone_fallback_to_user,
+                                                wait_for_available_bot=not _json_should_fallback_to_user(sender, clone_fallback_to_user),
+                                            )
+                                            if upload_target["sender"] == "user":
+                                                await db.add_msg_log("JSON_FALLBACK", f"消息ID:{msg_id} | 当前 Bot 已失效，已切换辅助账号发送")
+                                                sent = await _send_json_single_via_user(
+                                                    target_id,
+                                                    media_type,
+                                                    media_path,
+                                                    caption,
+                                                    reply_to_id,
+                                                    SharedUploadProgressTracker("上传中 [辅助账号回退]", file_size),
+                                                    file_label,
+                                                    media_has_spoiler,
+                                                )
+                                                break
+                                            continue
                                         if not thumb_path or not os.path.exists(thumb_path):
                                             raise
                                         await db.add_msg_log("JSON_STICKER_AS_IMAGE", f"消息ID:{msg_id} | 贴纸发送失败，已回退为缩略图图片发送: {exc}")
@@ -583,6 +618,28 @@ async def process_json_sync(
                                         )
                                         if upload_target["sender"] == "user":
                                             await db.add_msg_log("JSON_FALLBACK", f"消息ID:{msg_id} | Bot 频控，已切换辅助账号发送")
+                                            sent = await _send_json_single_via_user(
+                                                target_id,
+                                                media_type,
+                                                media_path,
+                                                caption,
+                                                reply_to_id,
+                                                SharedUploadProgressTracker("上传中 [辅助账号回退]", file_size),
+                                                file_label,
+                                                media_has_spoiler,
+                                            )
+                                            break
+                                        continue
+                                    if bot_engine.should_disable_upload_bot_for_error(exc):
+                                        await bot_engine.disable_upload_bot(upload_target["client"], str(exc))
+                                        upload_target = await _select_json_upload_target(
+                                            sender,
+                                            [file_size],
+                                            clone_fallback_to_user=clone_fallback_to_user,
+                                            wait_for_available_bot=not _json_should_fallback_to_user(sender, clone_fallback_to_user),
+                                        )
+                                        if upload_target["sender"] == "user":
+                                            await db.add_msg_log("JSON_FALLBACK", f"消息ID:{msg_id} | 当前 Bot 已失效，已切换辅助账号发送")
                                             sent = await _send_json_single_via_user(
                                                 target_id,
                                                 media_type,
@@ -660,6 +717,19 @@ async def process_json_sync(
                                     )
                                     if upload_target["sender"] == "user":
                                         await db.add_msg_log("JSON_FALLBACK", f"消息ID:{msg_id} | Bot 频控，已切换辅助账号发送文本")
+                                        sent = await _send_json_text_via_user(target_id, text, reply_to_id)
+                                        break
+                                    continue
+                                if bot_engine.should_disable_upload_bot_for_error(exc):
+                                    await bot_engine.disable_upload_bot(upload_target["client"], str(exc))
+                                    upload_target = await _select_json_upload_target(
+                                        sender,
+                                        [],
+                                        clone_fallback_to_user=clone_fallback_to_user,
+                                        wait_for_available_bot=not _json_should_fallback_to_user(sender, clone_fallback_to_user),
+                                    )
+                                    if upload_target["sender"] == "user":
+                                        await db.add_msg_log("JSON_FALLBACK", f"消息ID:{msg_id} | 当前 Bot 已失效，已切换辅助账号发送文本")
                                         sent = await _send_json_text_via_user(target_id, text, reply_to_id)
                                         break
                                     continue

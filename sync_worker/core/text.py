@@ -16,6 +16,15 @@ TEXT_SPOILER_RE = re.compile(r"<(/?)(?:tg-)?spoiler\b", re.IGNORECASE)
 def _message_value(msg, key, default=None):
     if isinstance(msg, dict):
         return msg.get(key, default)
+    raw_dict = getattr(msg, "__dict__", None)
+    if isinstance(raw_dict, dict) and key in raw_dict:
+        return raw_dict.get(key, default)
+    model_extra = getattr(msg, "model_extra", None)
+    if isinstance(model_extra, dict) and key in model_extra:
+        return model_extra.get(key, default)
+    pydantic_extra = getattr(msg, "__pydantic_extra__", None)
+    if isinstance(pydantic_extra, dict) and key in pydantic_extra:
+        return pydantic_extra.get(key, default)
     return getattr(msg, key, default)
 
 
