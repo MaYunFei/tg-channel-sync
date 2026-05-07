@@ -1,7 +1,7 @@
 import unittest
 import tempfile
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 import asyncio
 
 import bot_engine
@@ -245,6 +245,48 @@ class SyncServiceTests(unittest.IsolatedAsyncioTestCase):
             await history.process_master_sync("json", "bot", "", "@target", 1, 0, 0, "fake.json", False, "", 3)
 
         mock_add_log.assert_any_await("INFO", "任务运行完毕：JSON | 已处理 0 / 0 | 跳过 0")
+
+    async def test_sync_single_message_clone_uses_chunk_downloader_when_enabled(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            download_path = Path(temp_dir) / "photo.jpg"
+            download_path.write_bytes(b"photo-bytes")
+            msg = type("Msg", (), {"id": 7, "text": None, "caption": None, "photo": type("Photo", (), {"file_name": "demo.jpg"})()})()
+            fake_app = type("FakeApp", (), {"download_media": AsyncMock()})()
+            fake_sent = type("Sent", (), {"id": 101})()
+
+            with patch("sync_worker.clone.process.get_msg_meta", return_value=("photo", "sync_photo")), \
+                 patch("sync_worker.clone.process.db.apply_message_filters", AsyncMock(return_value=(False, ""))), \
+                 patch("sync_worker.clone.process.update_state_and_check_skip", AsyncMock(return_value=False)), \
+                 patch("sync_worker.clone.process.resolve_reply_target", AsyncMock(return_value=None)), \
+                 patch("sync_worker.clone.process.build_link_rewrite_context", AsyncMock(return_value={})), \
+                 patch("sync_worker.clone.process.rewrite_message_links", AsyncMock(return_value=("", 0))), \
+                 patch("sync_worker.clone.process.has_media_spoiler", return_value=False), \
+                 patch("sync_worker.clone.process.has_text_spoiler", return_value=False), \
+                 patch("sync_worker.clone.process.download_media_in_chunks", AsyncMock(return_value=str(download_path))) as mock_chunk_download, \
+                 patch("sync_worker.clone.process.prepare_media_for_send", AsyncMock(return_value=str(download_path))), \
+                 patch("sync_worker.clone.process.resolve_upload_target", Mock(return_value=object())), \
+                 patch("sync_worker.clone.process.safe_execute", AsyncMock(return_value={"sender": "user", "client": fake_app, "parse_mode": history.ParseMode.HTML, "label": "辅助账号"})), \
+                 patch("sync_worker.clone.process._execute_with_clone_retry", AsyncMock(return_value=fake_sent)), \
+                 patch("sync_worker.clone.process.dynamic_send", AsyncMock()), \
+                 patch("sync_worker.clone.process.record_success", AsyncMock()) as mock_record_success, \
+                 patch("sync_worker.clone.process.db.add_msg_log", AsyncMock()):
+                await history.sync_single_message(
+                    "clone",
+                    "user",
+                    fake_app,
+                    object(),
+                    -100123,
+                    -100456,
+                    msg,
+                    0,
+                    False,
+                    clone_chunk_download_enabled=True,
+                    clone_chunk_download_workers=4,
+                )
+
+            mock_chunk_download.assert_awaited_once()
+            fake_app.download_media.assert_not_awaited()
+            mock_record_success.assert_awaited_once_with(-100123, -100456, 7, 101, force_send=False)
 
     async def test_process_master_sync_logs_failed_summary_for_network_abort(self):
         async def _raise_with_progress(*args, **kwargs):

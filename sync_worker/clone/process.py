@@ -63,6 +63,7 @@ from .helpers import (
     _is_request_entity_too_large,
     _parse_retry_after_seconds,
 )
+from .raw_downloader import ChunkedDownloadFallback, download_media_in_chunks
 from ..json_import import process_json_sync
 
 
@@ -160,7 +161,22 @@ async def _fetch_last_message_id(app, source_id):
     )
 
 
-async def sync_single_message(mode, sender, app, bot, source_id, target_id, msg, safe_delay, force_send, hash_perturb=False, clone_fallback_to_user=True, include_external_source_header: bool = False):
+async def sync_single_message(
+    mode,
+    sender,
+    app,
+    bot,
+    source_id,
+    target_id,
+    msg,
+    safe_delay,
+    force_send,
+    hash_perturb=False,
+    clone_fallback_to_user=True,
+    include_external_source_header: bool = False,
+    clone_chunk_download_enabled: bool = False,
+    clone_chunk_download_workers: int = 4,
+):
     msg_type, _ = get_msg_meta(msg, mode)
     has_media = msg_type != "text"
     file_name = getattr(getattr(msg, msg_type, None), "file_name", "") if msg_type in ["document", "video"] else ""
@@ -286,16 +302,33 @@ async def sync_single_message(mode, sender, app, bot, source_id, target_id, msg,
                         break
                     try:
                         download_target = _build_temp_download_path(msg, msg_type)
-                        file_path = await execute_with_network_retry(
-                            lambda: app.download_media(
-                                msg,
-                                file_name=download_target,
-                                progress=create_progress_callback("下载中", sync_state),
-                            ),
-                            action_label=f"下载媒体 {msg.id}",
-                            sync_state=sync_state,
-                            log_tag="CLONE_NETWORK_RETRY",
-                        )
+                        chunk_download_failed = False
+                        if clone_chunk_download_enabled:
+                            try:
+                                file_path = await download_media_in_chunks(
+                                    app,
+                                    msg,
+                                    msg_type,
+                                    download_target,
+                                    worker_count=clone_chunk_download_workers,
+                                )
+                            except ChunkedDownloadFallback as exc:
+                                chunk_download_failed = True
+                                await db.add_msg_log("CLONE_CHUNK_FALLBACK", f"消息ID:{msg.id} | 已回退普通下载: {exc}")
+                            except Exception as exc:
+                                chunk_download_failed = True
+                                await db.add_msg_log("CLONE_CHUNK_FALLBACK", f"消息ID:{msg.id} | 分块并发下载失败，已回退普通下载: {exc}")
+                        if not file_path or chunk_download_failed:
+                            file_path = await execute_with_network_retry(
+                                lambda: app.download_media(
+                                    msg,
+                                    file_name=download_target,
+                                    progress=create_progress_callback("下载中", sync_state),
+                                ),
+                                action_label=f"下载媒体 {msg.id}",
+                                sync_state=sync_state,
+                                log_tag="CLONE_NETWORK_RETRY",
+                            )
                         if file_path:
                             break
                     except Exception as exc:
@@ -802,6 +835,8 @@ async def process_master_sync(
     settings = await db.get_all_settings()
     sync_config = get_config().get("sync", {})
     include_external_source_header = bool(sync_config.get("add_external_source_header", False))
+    clone_chunk_download_enabled = bool(sync_config.get("clone_chunk_download_enabled", False))
+    clone_chunk_download_workers = min(8, max(1, int(sync_config.get("clone_chunk_download_workers", 4) or 4)))
     if not include_external_source_header:
         legacy_value = str(getattr(settings, "get", lambda *_: "")("add_external_source_header", "") or "").strip().lower()
         include_external_source_header = legacy_value in {"1", "true", "yes", "on"}
@@ -817,6 +852,8 @@ async def process_master_sync(
     if mode == "clone":
         await clear_temp_dir_files()
         await db.add_log("INFO", "已清空 temp，准备下载")
+        if clone_chunk_download_enabled:
+            await db.add_log("INFO", f"下载重传已启用分块并发下载 | 并发下载数: {clone_chunk_download_workers}")
 
     final_status = "completed"
     try:
@@ -866,6 +903,8 @@ async def process_master_sync(
                             hash_perturb=hash_perturb,
                             clone_fallback_to_user=clone_fallback_to_user,
                             include_external_source_header=include_external_source_header,
+                            clone_chunk_download_enabled=clone_chunk_download_enabled,
+                            clone_chunk_download_workers=clone_chunk_download_workers,
                         )
                     else:
                         await sync_media_group(
