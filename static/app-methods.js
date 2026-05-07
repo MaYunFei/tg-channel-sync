@@ -179,6 +179,12 @@
       this.msgLogs = api.ensureSuccess(await api.getJson("/api/logs/message"), "加载消息日志失败");
       this.$nextTick(() => this.scrollLogsToBottom({ sys: false, msg: true }));
     },
+    exportSystemLogs() {
+      window.open("/api/logs/system/export", "_blank", "noopener");
+    },
+    exportMessageLogs() {
+      window.open("/api/logs/message/export", "_blank", "noopener");
+    },
     async clearSystemLogs() {
       if (!window.confirm("确认清理系统日志吗？")) return;
       try {

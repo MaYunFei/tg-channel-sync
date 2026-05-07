@@ -4,12 +4,13 @@ import json
 import shutil
 import signal
 import sys
+from datetime import datetime
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import uvicorn
 from fastapi import BackgroundTasks, FastAPI, Form, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 import database as db
@@ -443,6 +444,18 @@ async def get_system_logs():
     return [{"id": row[0], "time": row[1], "level": row[2], "msg": row[3]} for row in reversed(rows)]
 
 
+@app.get("/api/logs/system/export")
+async def export_system_logs():
+    rows = await db.get_all_sys_logs()
+    content = "\n".join(f"[{row[1]}] [{row[2]}] {row[3]}" for row in rows)
+    filename = f"system-logs-{datetime.now().strftime('%Y-%m-%d-%H%M%S')}.txt"
+    return Response(
+        content=content,
+        media_type="text/plain; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @app.delete("/api/logs/system")
 async def clear_system_logs():
     await db.clear_sys_logs()
@@ -453,6 +466,18 @@ async def clear_system_logs():
 async def get_message_logs():
     rows = await db.get_recent_msg_logs()
     return [{"id": row[0], "time": row[1], "action": row[2], "detail": row[3]} for row in reversed(rows)]
+
+
+@app.get("/api/logs/message/export")
+async def export_message_logs():
+    rows = await db.get_all_msg_logs()
+    content = "\n".join(f"[{row[1]}] [{row[2]}] {row[3]}" for row in rows)
+    filename = f"message-logs-{datetime.now().strftime('%Y-%m-%d-%H%M%S')}.txt"
+    return Response(
+        content=content,
+        media_type="text/plain; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.delete("/api/logs/message")

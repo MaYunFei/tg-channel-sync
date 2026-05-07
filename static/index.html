@@ -60,7 +60,14 @@
         <div class="console-layout">
             <div class="console-main">
                 <sync-panel :status="syncStatus" :form="syncForm" :stopping="stopping" @start="startSync" @stop="stopSync"></sync-panel>
-                <log-viewer :sys-logs="sysLogs" :msg-logs="msgLogs" @clear-sys-logs="clearSystemLogs" @clear-msg-logs="clearMessageLogs"></log-viewer>
+                <log-viewer
+                    :sys-logs="sysLogs"
+                    :msg-logs="msgLogs"
+                    @clear-sys-logs="clearSystemLogs"
+                    @clear-msg-logs="clearMessageLogs"
+                    @export-sys-logs="exportSystemLogs"
+                    @export-msg-logs="exportMessageLogs"
+                ></log-viewer>
             </div>
             <div class="console-side">
                 <channel-mapping :mappings="mappings" @add="addMapping" @del="deleteMapping" @log-error="showAppError"></channel-mapping>

@@ -45,3 +45,35 @@ class AppConfigTests(unittest.TestCase):
 
         self.assertEqual(updated["telegram"]["bot_token"], "next")
         self.assertEqual(cached["telegram"]["bot_token"], "next")
+
+    def test_log_retention_defaults_are_present(self):
+        config = app_config.get_config()
+
+        self.assertEqual(config["sync"]["system_log_retention_limit"], 1000)
+        self.assertEqual(config["sync"]["message_log_retention_limit"], 5000)
+
+    def test_log_retention_invalid_values_fall_back_to_defaults(self):
+        config = app_config.save_config(
+            {
+                "sync": {
+                    "system_log_retention_limit": "abc",
+                    "message_log_retention_limit": None,
+                }
+            }
+        )
+
+        self.assertEqual(config["sync"]["system_log_retention_limit"], 1000)
+        self.assertEqual(config["sync"]["message_log_retention_limit"], 5000)
+
+    def test_log_retention_values_are_clamped_to_minimum(self):
+        config = app_config.save_config(
+            {
+                "sync": {
+                    "system_log_retention_limit": 1,
+                    "message_log_retention_limit": "99",
+                }
+            }
+        )
+
+        self.assertEqual(config["sync"]["system_log_retention_limit"], 100)
+        self.assertEqual(config["sync"]["message_log_retention_limit"], 100)

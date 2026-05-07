@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 
 import aiosqlite
 
+from app_config import get_config
 from app_paths import database_file, ensure_runtime_dirs
 
 
@@ -391,15 +392,33 @@ async def is_message_synced(source_channel_id: int, source_msg_id: int, target_c
 async def _append_log(table: str, fields: tuple[str, str], values: tuple[str, str]) -> None:
     columns = ", ".join(fields)
     placeholders = ", ".join("?" for _ in fields)
+    retention_limit = get_log_retention_limit(table)
 
     async def action(conn: aiosqlite.Connection):
         await conn.execute(f"INSERT INTO {table} ({columns}) VALUES ({placeholders})", values)
         await conn.execute(
             f"DELETE FROM {table} WHERE id NOT IN (SELECT id FROM {table} ORDER BY id DESC LIMIT ?)",
-            (LOG_RETENTION_LIMIT,),
+            (retention_limit,),
         )
 
     await _run_in_db(action, commit=True)
+
+
+def get_log_retention_limit(table: str) -> int:
+    sync_cfg = get_config().get("sync", {})
+    if table == "system_logs":
+        value = sync_cfg.get("system_log_retention_limit", 1000)
+        default_value = 1000
+    elif table == "message_logs":
+        value = sync_cfg.get("message_log_retention_limit", 5000)
+        default_value = 5000
+    else:
+        value = LOG_RETENTION_LIMIT
+        default_value = LOG_RETENTION_LIMIT
+    try:
+        return max(100, int(value or default_value))
+    except (TypeError, ValueError):
+        return default_value
 
 
 async def add_log(level: str, message: str):
@@ -443,6 +462,20 @@ async def get_recent_msg_logs(limit: int = LOG_RETENTION_LIMIT) -> list:
         "SELECT id, datetime(created_at, 'localtime'), action, detail "
         "FROM message_logs ORDER BY id DESC LIMIT ?",
         (limit,),
+    )
+
+
+async def get_all_sys_logs() -> list:
+    return await _fetchall(
+        "SELECT id, datetime(created_at, 'localtime'), level, message "
+        "FROM system_logs ORDER BY id ASC"
+    )
+
+
+async def get_all_msg_logs() -> list:
+    return await _fetchall(
+        "SELECT id, datetime(created_at, 'localtime'), action, detail "
+        "FROM message_logs ORDER BY id ASC"
     )
 
 

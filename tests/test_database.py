@@ -12,14 +12,17 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.db_path = Path(self.temp_dir.name) / "data.db"
         self.original_db_file = database.DB_FILE
         self.original_ensure_dirs = database.ensure_runtime_dirs
+        self.original_get_config = database.get_config
         database.DB_FILE = str(self.db_path)
         database.ensure_runtime_dirs = lambda: self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        database.get_config = lambda: {"sync": {"system_log_retention_limit": 1000, "message_log_retention_limit": 5000}}
         await database.close_db()
 
     async def asyncTearDown(self):
         await database.close_db()
         database.DB_FILE = self.original_db_file
         database.ensure_runtime_dirs = self.original_ensure_dirs
+        database.get_config = self.original_get_config
         self.temp_dir.cleanup()
 
     async def test_init_db_migrates_old_tables(self):
@@ -41,15 +44,27 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(mapping["realtime_hash_perturb"])
         self.assertEqual(await database.get_target_msg_id(1001, 11, 2001), 99)
 
-    async def test_log_retention_keeps_latest_100(self):
+    async def test_system_log_retention_uses_configured_limit(self):
         await database.init_db()
-        for index in range(105):
+        database.get_config = lambda: {"sync": {"system_log_retention_limit": 120, "message_log_retention_limit": 5000}}
+        for index in range(125):
             await database.add_sys_log("INFO", f"log-{index}")
 
-        rows = await database.get_recent_sys_logs()
-        self.assertEqual(len(rows), 100)
-        self.assertEqual(rows[0][3], "log-104")
-        self.assertEqual(rows[-1][3], "log-5")
+        rows = await database.get_all_sys_logs()
+        self.assertEqual(len(rows), 120)
+        self.assertEqual(rows[0][3], "log-5")
+        self.assertEqual(rows[-1][3], "log-124")
+
+    async def test_message_log_retention_uses_independent_configured_limit(self):
+        await database.init_db()
+        database.get_config = lambda: {"sync": {"system_log_retention_limit": 1000, "message_log_retention_limit": 150}}
+        for index in range(160):
+            await database.add_msg_log("SEND", f"log-{index}")
+
+        rows = await database.get_all_msg_logs()
+        self.assertEqual(len(rows), 150)
+        self.assertEqual(rows[0][3], "log-10")
+        self.assertEqual(rows[-1][3], "log-159")
 
     async def test_multi_target_message_mapping_isolated(self):
         await database.init_db()

@@ -3,6 +3,42 @@ const AppCard = {
   template: `<section class="card"><slot></slot></section>`,
 };
 
+const SectionHeader = {
+  props: ["title", "description", "titleClass", "descriptionClass"],
+  template: `<div class="section-header">
+    <h2 :class="titleClass || 'section-title'">{{ title }}</h2>
+    <p v-if="description" :class="descriptionClass || 'section-description'">{{ description }}</p>
+  </div>`,
+};
+
+const FormSection = {
+  props: ["title", "description", "titleClass", "descriptionClass", "bodyClass"],
+  components: { SectionHeader },
+  template: `<section class="form-section">
+    <section-header
+      :title="title"
+      :description="description"
+      :title-class="titleClass"
+      :description-class="descriptionClass"
+    ></section-header>
+    <div :class="bodyClass || 'form-section-body'"><slot></slot></div>
+  </section>`,
+};
+
+const FieldGroup = {
+  props: ["label", "hint", "labelClass", "hintClass", "wrapperClass"],
+  template: `<div :class="wrapperClass || 'field-group'">
+    <label v-if="label" :class="labelClass || 'field-label'">{{ label }}</label>
+    <slot></slot>
+    <p v-if="hint" :class="hintClass || 'field-hint'">{{ hint }}</p>
+  </div>`,
+};
+
+const ActionBar = {
+  props: ["className"],
+  template: `<div :class="className || 'action-bar'"><slot></slot></div>`,
+};
+
 const ToastBanner = {
   props: ["notice"],
   template: `<div v-if="notice && notice.message" class="mb-6 rounded-lg border px-4 py-3 text-sm"
@@ -81,7 +117,7 @@ const SenderIdentityOptions = {
 const LogPanel = {
   components: { AppCard },
   props: ["title", "description", "logs", "kind", "panelId"],
-  emits: ["clear"],
+  emits: ["clear", "export"],
   methods: {
     levelClass(value) {
       const text = String(value || "");
@@ -103,8 +139,9 @@ const LogPanel = {
     <div class="mb-3">
       <h2 class="text-lg font-semibold">{{ title }}</h2>
       <p class="text-xs text-gray-500">{{ description }}</p>
-      <div class="mt-3 flex justify-end">
-        <button @click="$emit('clear')" class="btn-secondary shrink-0 !px-3 !py-1 text-xs">清理</button>
+      <div class="mt-3 flex items-center justify-between gap-3">
+        <button @click="$emit('export')" class="btn-secondary btn-inline !px-3 !py-1 text-xs">导出</button>
+        <button @click="$emit('clear')" class="btn-secondary btn-inline !px-3 !py-1 text-xs">清理</button>
       </div>
     </div>
     <div :id="panelId" class="log-panel">
@@ -124,6 +161,10 @@ const LogPanel = {
 
 window.TgcsUi = {
   AppCard,
+  SectionHeader,
+  FormSection,
+  FieldGroup,
+  ActionBar,
   ToastBanner,
   EmptyState,
   MappingOptionBadges,
