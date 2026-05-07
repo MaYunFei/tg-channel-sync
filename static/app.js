@@ -4,9 +4,13 @@ const {
   SectionHeader,
   FormSection,
   FieldGroup,
+  FieldBadge,
   ActionBar,
   ToastBanner,
   LogPanel,
+  SettingSectionNav,
+  SettingGroup,
+  ToggleField,
   MappingOptionBadges,
   EmptyState,
   SenderIdentityOptions,
@@ -81,15 +85,314 @@ const GlobalFilters = {
 };
 const UserAuthPanel = {
   props:["auth","submitting","cooldown"],
-  components:{ AppCard, SectionHeader, ActionBar },
+  components:{ AppCard, SectionHeader, ActionBar, FieldBadge },
   data(){ return { phoneNumber:"", phoneCode:"", password:"" }; },
   watch:{ auth:{ immediate:true, handler(v){ if(v && v.phone_number) this.phoneNumber = v.phone_number; } } },
-  template:`<app-card><section-header title="辅助账号登录" description="首次登录辅助账号时，在这里完成手机号、验证码和两步验证密码输入。"></section-header><div class="bg-slate-50 border border-slate-200 rounded p-3 text-sm mt-4 mb-4"><div><b>当前状态：</b>{{ auth.status_label || '未登录' }}</div><div v-if="auth.phone_number" class="text-xs text-gray-500 mt-1">手机号：{{ auth.phone_number }}</div><div v-if="auth.password_hint" class="text-xs text-amber-700 mt-1">密码提示：{{ auth.password_hint }}</div></div><div class="form-stack"><div class="flex flex-col gap-3 md:flex-row"><input v-model="phoneNumber" type="text" placeholder="手机号，例如 +8613712345678" class="input-box"><button @click="$emit('send-code', phoneNumber)" :disabled="submitting || cooldown > 0" class="btn-primary md:w-auto md:min-w-[140px]">{{ cooldown > 0 ? (cooldown + 's 后重试') : '发送验证码' }}</button></div><div v-if="auth.status === 'authorized'" class="flex justify-end"><button @click="$emit('switch-account')" :disabled="submitting" class="btn-secondary md:w-auto">切换账号</button></div><div v-if="auth.awaiting_code" class="space-y-3 border-t pt-4"><input v-model="phoneCode" type="text" placeholder="输入验证码" class="input-box"><action-bar><button @click="$emit('verify-code', phoneCode)" :disabled="submitting" class="btn-primary">提交验证码</button><button @click="$emit('cancel-auth')" :disabled="submitting" class="btn-secondary">取消</button></action-bar></div><div v-if="auth.awaiting_password" class="space-y-3 border-t pt-4"><input v-model="password" type="password" placeholder="输入两步验证密码" class="input-box"><action-bar><button @click="$emit('submit-password', password)" :disabled="submitting" class="btn-primary">提交密码</button><button @click="$emit('cancel-auth')" :disabled="submitting" class="btn-secondary">取消</button></action-bar></div></div></app-card>`
+  template:`
+    <app-card id="settings-account" class="settings-section-card">
+      <div class="settings-section-header">
+        <div class="settings-section-title-row">
+          <h2 class="settings-section-title">辅助账号</h2>
+          <field-badge text="按步骤完成"></field-badge>
+        </div>
+      </div>
+
+      <div class="settings-auth-shell">
+        <div class="settings-auth-status">
+          <div class="settings-auth-status-head">
+            <div>
+              <div class="settings-auth-status-title">当前状态</div>
+              <div class="settings-auth-status-text mt-1">{{ auth.status_label || '未登录' }}</div>
+            </div>
+            <field-badge :text="auth.status === 'authorized' ? '已授权' : '待处理'" :tone="auth.status === 'authorized' ? 'muted' : ''"></field-badge>
+          </div>
+          <div class="settings-auth-meta">
+            <div class="text-xs text-slate-500" v-if="auth.phone_number">手机号：{{ auth.phone_number }}</div>
+            <div class="text-xs text-amber-700" v-if="auth.password_hint">密码提示：{{ auth.password_hint }}</div>
+            <div class="text-xs text-slate-500" v-if="!auth.phone_number && !auth.password_hint">尚未绑定辅助账号，发送验证码后继续。</div>
+          </div>
+          <div v-if="auth.status === 'authorized'" class="pt-1">
+            <button @click="$emit('switch-account')" :disabled="submitting" class="btn-secondary md:w-auto">切换账号</button>
+          </div>
+        </div>
+
+        <div class="settings-auth-step">
+          <div class="settings-auth-step-title">
+            {{ auth.awaiting_password ? '步骤 3 · 输入两步验证密码' : (auth.awaiting_code ? '步骤 2 · 输入验证码' : '步骤 1 · 发送验证码') }}
+          </div>
+          <p class="settings-auth-step-description">
+            {{ auth.awaiting_password
+              ? '如果账号开启了两步验证，请输入密码完成授权。'
+              : (auth.awaiting_code
+                ? '验证码发送成功后，在这里提交收到的登录验证码。'
+                : '输入辅助账号手机号，系统会向 Telegram 发送验证码。') }}
+          </p>
+
+          <div class="form-stack mt-4">
+            <div v-if="!auth.awaiting_code && !auth.awaiting_password" class="flex flex-col gap-3 md:flex-row">
+              <input v-model="phoneNumber" type="text" placeholder="手机号，例如 +8613712345678" class="input-box">
+              <button @click="$emit('send-code', phoneNumber)" :disabled="submitting || cooldown > 0" class="btn-primary md:w-auto md:min-w-[160px]">
+                {{ cooldown > 0 ? (cooldown + 's 后重试') : '发送验证码' }}
+              </button>
+            </div>
+
+            <div v-if="auth.awaiting_code" class="form-stack">
+              <input v-model="phoneCode" type="text" placeholder="输入验证码" class="input-box">
+              <action-bar>
+                <button @click="$emit('verify-code', phoneCode)" :disabled="submitting" class="btn-primary">提交验证码</button>
+                <button @click="$emit('cancel-auth')" :disabled="submitting" class="btn-secondary">取消</button>
+              </action-bar>
+            </div>
+
+            <div v-if="auth.awaiting_password" class="form-stack">
+              <input v-model="password" type="password" placeholder="输入两步验证密码" class="input-box">
+              <action-bar>
+                <button @click="$emit('submit-password', password)" :disabled="submitting" class="btn-primary">提交密码</button>
+                <button @click="$emit('cancel-auth')" :disabled="submitting" class="btn-secondary">取消</button>
+              </action-bar>
+            </div>
+          </div>
+        </div>
+      </div>
+    </app-card>
+  `
 };
 
 const SettingsPanel = {
-  props:["config","saving","userAuth","authSubmitting","sendCodeCooldown"], components:{ AppCard, SectionHeader, FormSection, FieldGroup, ActionBar, BotApiHint, UserAuthPanel },
-  template:`<div class="space-y-6"><app-card><section-header title="设置" description="编辑 config.json，并在需要时重启服务使配置生效。"></section-header></app-card><app-card><form-section title="基础配置" title-class="text-sm font-bold text-slate-800"><div class="field-grid field-grid-lg-2"><div class="form-stack"><section-header title="Telegram 配置" title-class="text-xs font-semibold uppercase tracking-wide text-slate-500"></section-header><field-group label="BOT_TOKEN【需重启】"><input v-model="config.telegram.bot_token" type="text" class="input-box"></field-group><field-group label="BOT_API_BASE_URL（可选，需重启）"><input v-model="config.telegram.bot_api_base_url" type="text" class="input-box"><bot-api-hint></bot-api-hint></field-group><field-group label="额外 BOT_TOKEN（每行一个，用于上传轮换，需重启）"><textarea v-model="config.telegram.extra_bot_tokens" rows="4" class="input-box font-mono text-sm"></textarea></field-group><field-group label="API_ID【需重启】"><input v-model="config.telegram.api_id" type="number" class="input-box"></field-group><field-group label="API_HASH【需重启】"><input v-model="config.telegram.api_hash" type="text" class="input-box"></field-group></div><div class="form-stack"><section-header title="代理与程序配置" title-class="text-xs font-semibold uppercase tracking-wide text-slate-500"></section-header><label class="flex items-center text-sm"><input v-model="config.proxy.enabled" type="checkbox" class="mr-2">启用代理【需重启】</label><div class="field-grid field-grid-two" :class="{ 'opacity-50': !config.proxy.enabled }"><field-group label="HOST【需重启】"><input v-model="config.proxy.host" type="text" class="input-box"></field-group><field-group label="PORT【需重启】"><input v-model="config.proxy.port" type="number" class="input-box"></field-group><field-group label="USERNAME【需重启】"><input v-model="config.proxy.username" type="text" class="input-box"></field-group><field-group label="PASSWORD【需重启】"><input v-model="config.proxy.password" type="password" class="input-box"></field-group></div><field-group label="服务端口【需重启】"><input v-model="config.server.port" type="number" class="input-box"></field-group><label class="flex items-center text-sm"><input v-model="config.server.auto_open_browser" type="checkbox" class="mr-2">启动后自动打开浏览器【需重启】</label><field-group label="默认延时（秒）"><input v-model="config.sync.default_delay" type="number" step="0.5" min="0.5" class="input-box"></field-group></div></div></form-section></app-card><app-card><form-section title="同步配置" title-class="text-sm font-bold text-slate-800"><div class="form-stack"><label class="flex items-center text-sm"><input v-model="config.sync.force_send" type="checkbox" class="mr-2">默认强制发送</label><label class="flex items-center text-sm"><input v-model="config.sync.add_external_source_header" type="checkbox" class="mr-2">为外部转发/回复追加来源前缀</label><p class="text-xs text-gray-500">开启后，会在消息第一行追加 <code>#转发自 ...</code> 或 <code>#回复自外部消息</code> 链接；对 JSON 导入、API 复制、下载重传全部生效。</p><label class="flex items-center text-sm"><input v-model="config.sync.clone_chunk_download_enabled" type="checkbox" class="mr-2">启用分块并发下载</label><field-group label="并发下载数" hint="仅影响下载重传模式的下载阶段，部分媒体会自动回退为普通下载。"><input v-model="config.sync.clone_chunk_download_workers" type="number" step="1" min="1" max="8" class="input-box"></field-group><label class="flex items-center text-sm"><input v-model="config.sync.prefer_local_bot_api" type="checkbox" class="mr-2">下载重传优先使用本地 Bot API</label><field-group label="未启用本地 Bot API 时的 bot 单文件上限（MB）"><input v-model="config.sync.bot_upload_max_mb" type="number" step="1" min="1" class="input-box"></field-group><label class="flex items-center text-sm"><input v-model="config.sync.bot_rate_limit_enabled" type="checkbox" class="mr-2">启用多 bot 上传限流轮换</label><div class="field-grid field-grid-md-3"><field-group label="阈值（GB）"><input v-model="config.sync.bot_rate_limit_gb" type="number" step="0.1" min="0.1" class="input-box"></field-group><field-group label="统计窗口（小时）"><input v-model="config.sync.bot_rate_limit_window_hours" type="number" step="1" min="1" class="input-box"></field-group><field-group label="冷却时间（分钟）"><input v-model="config.sync.bot_rate_limit_cooldown_minutes" type="number" step="1" min="1" class="input-box"></field-group></div></div></form-section></app-card><app-card><form-section title="日志配置" title-class="text-sm font-bold text-slate-800"><div class="field-grid field-grid-md-2"><field-group label="系统日志最大保留条数"><input v-model="config.sync.system_log_retention_limit" type="number" step="1" min="100" class="input-box"></field-group><field-group label="消息日志最大保留条数"><input v-model="config.sync.message_log_retention_limit" type="number" step="1" min="100" class="input-box"></field-group></div><p class="text-xs text-gray-500 mt-3">日志页面默认只显示最近一部分；导出可获取当前保留的全部日志。</p></form-section></app-card><user-auth-panel :auth="userAuth" :submitting="authSubmitting" :cooldown="sendCodeCooldown" @send-code="$emit('send-code', $event)" @verify-code="$emit('verify-code', $event)" @submit-password="$emit('submit-password', $event)" @cancel-auth="$emit('cancel-auth')" @switch-account="$emit('switch-account')"></user-auth-panel><app-card><action-bar><button @click="$emit('save-config', false)" :disabled="saving" class="btn-primary md:w-auto md:min-w-[140px]">保存设置</button><button @click="$emit('save-restart')" :disabled="saving" class="btn-secondary md:w-auto md:min-w-[140px]">保存并重启</button></action-bar></app-card></div>`
+  props:["config","saving","userAuth","authSubmitting","sendCodeCooldown"],
+  components:{ AppCard, FieldBadge, FieldGroup, ActionBar, BotApiHint, UserAuthPanel, SettingSectionNav, SettingGroup, ToggleField },
+  template:`
+    <div class="settings-shell">
+      <section class="settings-page-header">
+        <div class="settings-page-title-row">
+        <div>
+          <div class="settings-page-kicker">Settings Center</div>
+          <h1 class="settings-page-title">设置中心</h1>
+        </div>
+          <div class="settings-page-note">
+            <span>配置文件</span>
+            <code class="text-slate-700">config.json</code>
+          </div>
+        </div>
+        <setting-section-nav :items="[
+          { id: 'settings-basic', label: '基础' },
+          { id: 'settings-sync', label: '同步' },
+          { id: 'settings-logs', label: '日志' },
+          { id: 'settings-account', label: '账号' },
+          { id: 'settings-actions', label: '操作' }
+        ]"></setting-section-nav>
+      </section>
+
+      <app-card id="settings-basic" class="settings-section-card">
+        <div class="settings-section-header">
+          <div class="settings-section-title-row">
+            <h2 class="settings-section-title">基础配置</h2>
+            <field-badge text="多数需重启"></field-badge>
+          </div>
+        </div>
+
+        <div class="settings-grid settings-grid-12">
+          <setting-group
+            class="span-8 span-12"
+            title="Telegram 接入"
+          >
+            <div class="settings-grid settings-grid-12">
+              <field-group class="span-12" label="BOT_TOKEN" badge="需重启">
+                <input v-model="config.telegram.bot_token" type="text" class="input-box">
+              </field-group>
+              <field-group class="span-12" label="BOT_API_BASE_URL" badge="需重启">
+                <input v-model="config.telegram.bot_api_base_url" type="text" class="input-box">
+                <bot-api-hint></bot-api-hint>
+              </field-group>
+              <field-group class="span-6" label="API_ID" badge="需重启">
+                <input v-model="config.telegram.api_id" type="number" class="input-box">
+              </field-group>
+              <field-group class="span-6" label="API_HASH" badge="需重启">
+                <input v-model="config.telegram.api_hash" type="text" class="input-box">
+              </field-group>
+            </div>
+          </setting-group>
+
+          <setting-group
+            class="span-4 span-12"
+            title="程序行为"
+          >
+            <div class="settings-grid-tight">
+              <field-group label="服务端口" badge="需重启">
+                <input v-model="config.server.port" type="number" class="input-box">
+              </field-group>
+              <field-group label="默认延时（秒）">
+                <input v-model="config.sync.default_delay" type="number" step="0.5" min="0.5" class="input-box">
+              </field-group>
+              <toggle-field
+                label="启动后自动打开浏览器"
+                description="服务启动成功后自动打开控制台页面。"
+                badge="需重启"
+                :checked="config.server.auto_open_browser"
+                @update:checked="config.server.auto_open_browser = $event"
+              ></toggle-field>
+            </div>
+          </setting-group>
+
+          <setting-group
+            class="span-12"
+            title="代理网络"
+          >
+            <div class="settings-grid-tight">
+              <toggle-field
+                label="启用代理"
+                description="在受限网络环境中通过代理访问 Telegram。"
+                badge="需重启"
+                :checked="config.proxy.enabled"
+                @update:checked="config.proxy.enabled = $event"
+              ></toggle-field>
+              <div class="settings-grid settings-grid-md-2" :class="{ 'opacity-60': !config.proxy.enabled }">
+                <field-group label="HOST" badge="需重启">
+                  <input v-model="config.proxy.host" type="text" class="input-box">
+                </field-group>
+                <field-group label="PORT" badge="需重启">
+                  <input v-model="config.proxy.port" type="number" class="input-box">
+                </field-group>
+                <field-group label="USERNAME" badge="需重启">
+                  <input v-model="config.proxy.username" type="text" class="input-box">
+                </field-group>
+                <field-group label="PASSWORD" badge="需重启">
+                  <input v-model="config.proxy.password" type="password" class="input-box">
+                </field-group>
+              </div>
+            </div>
+          </setting-group>
+        </div>
+      </app-card>
+
+      <app-card id="settings-sync" class="settings-section-card">
+        <div class="settings-section-header">
+          <div class="settings-section-title-row">
+            <h2 class="settings-section-title">同步配置</h2>
+            <field-badge text="运行策略"></field-badge>
+          </div>
+        </div>
+
+        <div class="settings-grid settings-grid-md-2">
+          <setting-group
+            title="默认行为"
+          >
+            <div class="toggle-grid">
+              <toggle-field
+                label="默认强制发送"
+                description="默认跳过重复和断点检查，直接发送当前选中的消息。"
+                :checked="config.sync.force_send"
+                @update:checked="config.sync.force_send = $event"
+              ></toggle-field>
+              <toggle-field
+                label="为外部转发/回复追加来源前缀"
+                description="会在消息首行追加来源链接，对 JSON 导入、API 复制、下载重传都生效。"
+                :checked="config.sync.add_external_source_header"
+                @update:checked="config.sync.add_external_source_header = $event"
+              ></toggle-field>
+              <toggle-field
+                label="下载重传优先使用本地 Bot API"
+                description="优先走本地 Bot API 上传，适合大文件或高频上传场景。"
+                :checked="config.sync.prefer_local_bot_api"
+                @update:checked="config.sync.prefer_local_bot_api = $event"
+              ></toggle-field>
+            </div>
+          </setting-group>
+
+          <setting-group
+            title="上传与下载参数"
+          >
+            <div class="toggle-grid">
+              <toggle-field
+                label="启用分块并发下载"
+                description="仅影响下载重传模式的下载阶段。"
+                :checked="config.sync.clone_chunk_download_enabled"
+                @update:checked="config.sync.clone_chunk_download_enabled = $event"
+              ></toggle-field>
+              <div :class="{ 'opacity-60': !config.sync.clone_chunk_download_enabled }">
+                <field-group label="并发下载数" hint="部分媒体会自动回退为普通下载。">
+                  <input v-model="config.sync.clone_chunk_download_workers" type="number" step="1" min="1" max="8" class="input-box">
+                </field-group>
+              </div>
+              <field-group label="未启用本地 Bot API 时的单文件上限（MB）">
+                <input v-model="config.sync.bot_upload_max_mb" type="number" step="1" min="1" class="input-box">
+              </field-group>
+            </div>
+          </setting-group>
+        </div>
+
+        <setting-group
+          class="mt-4"
+          title="多 Bot 上传限流轮换"
+        >
+          <div class="settings-grid-tight">
+            <field-group label="额外 BOT_TOKEN" badge="需重启" hint="每行一个，用于上传轮换。">
+              <textarea v-model="config.telegram.extra_bot_tokens" rows="4" class="input-box font-mono text-sm"></textarea>
+            </field-group>
+            <toggle-field
+              label="启用多 bot 上传限流轮换"
+              description="适用于频繁上传时规避单个 Bot 的速率限制。"
+              :checked="config.sync.bot_rate_limit_enabled"
+              @update:checked="config.sync.bot_rate_limit_enabled = $event"
+            ></toggle-field>
+            <div class="settings-grid settings-grid-md-3" :class="{ 'opacity-60': !config.sync.bot_rate_limit_enabled }">
+              <field-group label="阈值（GB）">
+                <input v-model="config.sync.bot_rate_limit_gb" type="number" step="0.1" min="0.1" class="input-box">
+              </field-group>
+              <field-group label="统计窗口（小时）">
+                <input v-model="config.sync.bot_rate_limit_window_hours" type="number" step="1" min="1" class="input-box">
+              </field-group>
+              <field-group label="冷却时间（分钟）">
+                <input v-model="config.sync.bot_rate_limit_cooldown_minutes" type="number" step="1" min="1" class="input-box">
+              </field-group>
+            </div>
+          </div>
+        </setting-group>
+      </app-card>
+
+      <app-card id="settings-logs" class="settings-section-card">
+        <div class="settings-section-header">
+          <div class="settings-section-title-row">
+            <h2 class="settings-section-title">日志配置</h2>
+            <field-badge text="保留策略" tone="muted"></field-badge>
+          </div>
+        </div>
+
+        <div class="settings-grid settings-grid-md-2">
+          <field-group label="系统日志最大保留条数">
+            <input v-model="config.sync.system_log_retention_limit" type="number" step="1" min="100" class="input-box">
+          </field-group>
+          <field-group label="消息日志最大保留条数">
+            <input v-model="config.sync.message_log_retention_limit" type="number" step="1" min="100" class="input-box">
+          </field-group>
+        </div>
+      </app-card>
+
+      <user-auth-panel
+        :auth="userAuth"
+        :submitting="authSubmitting"
+        :cooldown="sendCodeCooldown"
+        @send-code="$emit('send-code', $event)"
+        @verify-code="$emit('verify-code', $event)"
+        @submit-password="$emit('submit-password', $event)"
+        @cancel-auth="$emit('cancel-auth')"
+        @switch-account="$emit('switch-account')"
+      ></user-auth-panel>
+
+      <app-card id="settings-actions" class="settings-section-card settings-action-card">
+        <div class="settings-section-header !mb-0 !border-b-0 !pb-0">
+          <div class="settings-section-title-row">
+            <h2 class="settings-section-title">操作</h2>
+            <span class="settings-compact-note">保存配置后可按需立即重启服务</span>
+          </div>
+        </div>
+        <action-bar class-name="action-bar mt-4">
+          <button @click="$emit('save-config', false)" :disabled="saving" class="btn-primary md:w-auto md:min-w-[160px]">保存设置</button>
+          <button @click="$emit('save-restart')" :disabled="saving" class="btn-secondary md:w-auto md:min-w-[160px]">保存并重启</button>
+        </action-bar>
+      </app-card>
+    </div>
+  `
 };
 
 createApp({

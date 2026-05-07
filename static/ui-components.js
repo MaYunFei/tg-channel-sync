@@ -26,12 +26,26 @@ const FormSection = {
 };
 
 const FieldGroup = {
-  props: ["label", "hint", "labelClass", "hintClass", "wrapperClass"],
+  props: ["label", "hint", "labelClass", "hintClass", "wrapperClass", "badge", "badgeClass"],
   template: `<div :class="wrapperClass || 'field-group'">
-    <label v-if="label" :class="labelClass || 'field-label'">{{ label }}</label>
+    <div v-if="label || badge" class="field-label-row">
+      <label v-if="label" :class="labelClass || 'field-label'">{{ label }}</label>
+      <span
+        v-if="badge"
+        :class="badgeClass || 'field-badge'"
+      >{{ badge }}</span>
+    </div>
     <slot></slot>
     <p v-if="hint" :class="hintClass || 'field-hint'">{{ hint }}</p>
   </div>`,
+};
+
+const FieldBadge = {
+  props: ["text", "tone"],
+  template: `<span
+    class="field-badge"
+    :class="tone === 'muted' ? 'field-badge-muted' : ''"
+  >{{ text }}</span>`,
 };
 
 const ActionBar = {
@@ -50,6 +64,65 @@ const ToastBanner = {
 const EmptyState = {
   props: ["text"],
   template: `<div class="rounded border border-dashed p-4 text-center text-gray-400">{{ text || '暂无数据' }}</div>`,
+};
+
+const SettingSectionNav = {
+  props: ["items"],
+  template: `<nav class="settings-section-nav" aria-label="设置分区导航">
+    <a
+      v-for="item in items"
+      :key="item.id"
+      :href="'#' + item.id"
+      class="settings-section-link"
+    >{{ item.label }}</a>
+  </nav>`,
+};
+
+const SettingGroup = {
+  props: ["title", "description", "badge", "bodyClass"],
+  components: { FieldBadge },
+  template: `<section class="settings-group">
+    <div class="settings-group-header">
+      <div class="settings-group-copy">
+        <div class="settings-group-title-row">
+          <h3 class="settings-group-title">{{ title }}</h3>
+          <field-badge v-if="badge" :text="badge" tone="muted"></field-badge>
+        </div>
+        <p v-if="description" class="settings-group-description">{{ description }}</p>
+      </div>
+    </div>
+    <div :class="bodyClass || 'settings-group-body'"><slot></slot></div>
+  </section>`,
+};
+
+const ToggleField = {
+  props: ["label", "description", "checked", "disabled", "badge"],
+  emits: ["update:checked"],
+  components: { FieldBadge },
+  methods: {
+    onChange(event) {
+      this.$emit("update:checked", event.target.checked);
+    },
+  },
+  template: `<label
+    class="toggle-field"
+    :class="{ 'toggle-field-disabled': disabled }"
+  >
+    <span class="toggle-field-copy">
+      <span class="toggle-field-title-row">
+        <span class="toggle-field-title">{{ label }}</span>
+        <field-badge v-if="badge" :text="badge" tone="muted"></field-badge>
+      </span>
+      <span v-if="description" class="toggle-field-description">{{ description }}</span>
+    </span>
+    <input
+      type="checkbox"
+      class="toggle-field-checkbox"
+      :checked="checked"
+      :disabled="disabled"
+      @change="onChange"
+    >
+  </label>`,
 };
 
 const MappingOptionBadges = {
@@ -164,9 +237,13 @@ window.TgcsUi = {
   SectionHeader,
   FormSection,
   FieldGroup,
+  FieldBadge,
   ActionBar,
   ToastBanner,
   EmptyState,
+  SettingSectionNav,
+  SettingGroup,
+  ToggleField,
   MappingOptionBadges,
   SenderIdentityOptions,
   LogPanel,
