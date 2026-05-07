@@ -4,15 +4,15 @@ body {
 .settings-shell {
     display: flex;
     flex-direction: column;
-    gap: 1.25rem;
+    gap: 0.9rem;
 }
 .card {
     background-color: white;
     border: 1px solid #e2e8f0;
     border-radius: 1rem;
     box-shadow: 0 10px 30px rgba(15, 23, 42, 0.05);
-    padding: 1.5rem;
-    margin-bottom: 1.25rem;
+    padding: 1.15rem;
+    margin-bottom: 0.9rem;
 }
 .section-header {
     display: flex;
@@ -50,7 +50,7 @@ body {
 .field-group {
     display: flex;
     flex-direction: column;
-    gap: 0.4rem;
+    gap: 0.3rem;
 }
 .field-label-row {
     display: flex;
@@ -72,12 +72,12 @@ body {
 .form-stack {
     display: flex;
     flex-direction: column;
-    gap: 0.75rem;
+    gap: 0.6rem;
 }
 .action-bar {
     display: flex;
     flex-direction: column;
-    gap: 0.75rem;
+    gap: 0.6rem;
 }
 .compact-card {
     margin-bottom: 0;
@@ -200,10 +200,10 @@ body {
 }
 .input-box {
     width: 100%;
-    min-height: 2.75rem;
+    min-height: 2.45rem;
     border: 1px solid #cbd5e1;
     border-radius: 0.75rem;
-    padding: 0.625rem 0.875rem;
+    padding: 0.5rem 0.8rem;
     font-size: 0.875rem;
     outline: none;
     background: #fff;
@@ -214,14 +214,14 @@ body {
     box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.12);
 }
 textarea.input-box {
-    min-height: 7rem;
+    min-height: 6rem;
     resize: vertical;
 }
 .btn-primary,
 .btn-secondary {
-    min-height: 2.75rem;
+    min-height: 2.45rem;
     border-radius: 0.8rem;
-    padding: 0.625rem 1rem;
+    padding: 0.5rem 0.95rem;
 }
 .btn-primary {
     box-shadow: 0 12px 24px rgba(79, 70, 229, 0.18);
@@ -232,9 +232,9 @@ textarea.input-box {
 .settings-page-header {
     display: flex;
     flex-direction: column;
-    gap: 1rem;
+    gap: 0.7rem;
     border-bottom: 1px solid #e2e8f0;
-    padding-bottom: 1rem;
+    padding-bottom: 0.7rem;
 }
 .settings-page-title-row {
     display: flex;
@@ -278,7 +278,7 @@ textarea.input-box {
     display: flex;
     gap: 0.65rem;
     overflow-x: auto;
-    padding-bottom: 0.25rem;
+    padding-bottom: 0.15rem;
     scrollbar-width: thin;
 }
 .settings-section-link {
@@ -286,7 +286,7 @@ textarea.input-box {
     border: 1px solid #dbe2ea;
     border-radius: 9999px;
     background: rgba(255, 255, 255, 0.78);
-    padding: 0.5rem 0.9rem;
+    padding: 0.42rem 0.82rem;
     color: #475569;
     font-size: 0.82rem;
     font-weight: 600;
@@ -303,9 +303,9 @@ textarea.input-box {
 .settings-section-header {
     display: flex;
     flex-direction: column;
-    gap: 0.75rem;
-    margin-bottom: 1.1rem;
-    padding-bottom: 1rem;
+    gap: 0.45rem;
+    margin-bottom: 0.8rem;
+    padding-bottom: 0.75rem;
     border-bottom: 1px solid #edf2f7;
 }
 .settings-section-title-row {
@@ -329,13 +329,13 @@ textarea.input-box {
     border: 1px solid #edf2f7;
     border-radius: 0.9rem;
     background: linear-gradient(180deg, #ffffff 0%, #fbfdff 100%);
-    padding: 1rem;
+    padding: 0.8rem;
 }
 .settings-group + .settings-group {
-    margin-top: 0.9rem;
+    margin-top: 0.65rem;
 }
 .settings-group-header {
-    margin-bottom: 0.95rem;
+    margin-bottom: 0.6rem;
 }
 .settings-group-title-row {
     display: flex;
@@ -350,23 +350,23 @@ textarea.input-box {
     line-height: 1.35;
 }
 .settings-group-description {
-    margin-top: 0.35rem;
+    margin-top: 0.2rem;
     color: #64748b;
     font-size: 0.78rem;
-    line-height: 1.45;
+    line-height: 1.35;
 }
 .settings-group-body {
     display: flex;
     flex-direction: column;
-    gap: 0.8rem;
+    gap: 0.6rem;
 }
 .settings-grid {
     display: grid;
-    gap: 0.8rem;
+    gap: 0.65rem;
 }
 .settings-grid-tight {
     display: grid;
-    gap: 0.7rem;
+    gap: 0.55rem;
 }
 .field-badge {
     display: inline-flex;
@@ -388,17 +388,17 @@ textarea.input-box {
 }
 .toggle-grid {
     display: grid;
-    gap: 0.75rem;
+    gap: 0.55rem;
 }
 .toggle-field {
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
-    gap: 1rem;
+    gap: 0.8rem;
     border: 1px solid #e2e8f0;
     border-radius: 0.9rem;
     background: #ffffff;
-    padding: 0.85rem 0.95rem;
+    padding: 0.65rem 0.8rem;
     transition: border-color 0.2s, background-color 0.2s;
 }
 .toggle-field:hover {
@@ -412,7 +412,7 @@ textarea.input-box {
     min-width: 0;
     display: flex;
     flex-direction: column;
-    gap: 0.28rem;
+    gap: 0.18rem;
 }
 .toggle-field-title-row {
     display: flex;
@@ -429,7 +429,7 @@ textarea.input-box {
 .toggle-field-description {
     color: #64748b;
     font-size: 0.76rem;
-    line-height: 1.45;
+    line-height: 1.35;
 }
 .toggle-field-checkbox {
     width: 1rem;
@@ -443,7 +443,7 @@ textarea.input-box {
     gap: 0.4rem;
     border-radius: 9999px;
     background: #f8fafc;
-    padding: 0.35rem 0.7rem;
+    padding: 0.28rem 0.62rem;
     color: #64748b;
     font-size: 0.74rem;
 }
@@ -457,15 +457,15 @@ textarea.input-box {
 }
 .settings-auth-shell {
     display: grid;
-    gap: 1rem;
+    gap: 0.8rem;
 }
 .settings-auth-status {
     display: grid;
-    gap: 0.9rem;
+    gap: 0.7rem;
     border: 1px solid #e2e8f0;
     border-radius: 1rem;
     background: linear-gradient(180deg, #f8fafc 0%, #ffffff 100%);
-    padding: 1rem;
+    padding: 0.8rem;
 }
 .settings-auth-status-head {
     display: flex;
@@ -485,13 +485,13 @@ textarea.input-box {
 }
 .settings-auth-meta {
     display: grid;
-    gap: 0.55rem;
+    gap: 0.35rem;
 }
 .settings-auth-step {
     border: 1px solid #e2e8f0;
     border-radius: 1rem;
     background: #ffffff;
-    padding: 1rem;
+    padding: 0.8rem;
 }
 .settings-auth-step-title {
     color: #0f172a;
@@ -499,10 +499,10 @@ textarea.input-box {
     font-weight: 700;
 }
 .settings-auth-step-description {
-    margin-top: 0.25rem;
+    margin-top: 0.18rem;
     color: #64748b;
     font-size: 0.78rem;
-    line-height: 1.45;
+    line-height: 1.35;
 }
 .settings-inline-action {
     display: flex;
@@ -542,7 +542,7 @@ textarea.input-box {
 }
 @media (max-width: 767px) {
     .card {
-        padding: 1rem;
+        padding: 0.9rem;
         border-radius: 0.9rem;
     }
     .settings-page-title {

@@ -164,16 +164,6 @@ const SettingsPanel = {
   template:`
     <div class="settings-shell">
       <section class="settings-page-header">
-        <div class="settings-page-title-row">
-        <div>
-          <div class="settings-page-kicker">Settings Center</div>
-          <h1 class="settings-page-title">设置中心</h1>
-        </div>
-          <div class="settings-page-note">
-            <span>配置文件</span>
-            <code class="text-slate-700">config.json</code>
-          </div>
-        </div>
         <setting-section-nav :items="[
           { id: 'settings-basic', label: '基础' },
           { id: 'settings-sync', label: '同步' },
