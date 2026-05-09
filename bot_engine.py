@@ -46,6 +46,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 aiogram_bot = None
 pyro_user_app = None
 upload_bots = []
+bot_api_mode = "cloud"
 dp = Dispatcher()
 media_group_cache = {}
 user_auth_state = {
@@ -94,15 +95,15 @@ def has_user_api_credentials():
     return bool(telegram.get("api_id") and telegram.get("api_hash"))
 
 
-def _build_bot_client(bot_token: str):
+def _build_bot_client(bot_token: str, *, use_local_api: bool = False):
     session_kwargs = {"timeout": 3600, "proxy": build_proxy_url()}
-    if _telegram_config().get("bot_api_base_url"):
+    if use_local_api and _telegram_config().get("bot_api_base_url"):
         session_kwargs["api"] = TelegramAPIServer.from_base(_telegram_config()["bot_api_base_url"])
     session = AiohttpSession(**session_kwargs)
     return Bot(token=bot_token, session=session)
 
 
-def _build_upload_bot_pool(primary_bot, primary_token: str):
+def _build_upload_bot_pool(primary_bot, primary_token: str, *, use_local_api: bool):
     telegram = _telegram_config()
     seen_tokens = set()
     pool = []
@@ -130,15 +131,15 @@ def _build_upload_bot_pool(primary_bot, primary_token: str):
 
     for index, token in enumerate(telegram.get("extra_bot_tokens", []), start=2):
         try:
-            add_bot(_build_bot_client(str(token).strip()), token, f"Bot#{index}")
+            add_bot(_build_bot_client(str(token).strip(), use_local_api=use_local_api), token, f"Bot#{index}")
         except Exception as exc:
             logging.warning("Init extra bot failed for Bot#%s: %s", index, exc)
 
     return pool
 
 
-def init_bot_client():
-    global aiogram_bot, upload_bots, upload_bot_rr_index
+def init_bot_client(*, use_local_api: bool | None = None):
+    global aiogram_bot, upload_bots, upload_bot_rr_index, bot_api_mode
     telegram = _telegram_config()
     bot_token = telegram.get("bot_token", "").strip()
     if not bot_token:
@@ -146,14 +147,17 @@ def init_bot_client():
         upload_bots = []
         return None
 
-    aiogram_bot = _build_bot_client(bot_token)
-    upload_bots = _build_upload_bot_pool(aiogram_bot, bot_token)
+    if use_local_api is None:
+        use_local_api = has_local_bot_api_server()
+    aiogram_bot = _build_bot_client(bot_token, use_local_api=use_local_api)
+    upload_bots = _build_upload_bot_pool(aiogram_bot, bot_token, use_local_api=use_local_api)
     upload_bot_rr_index = 0
+    bot_api_mode = "local" if use_local_api else "cloud"
     return aiogram_bot
 
 
 async def close_bot_client():
-    global aiogram_bot, upload_bots, upload_bot_rr_index
+    global aiogram_bot, upload_bots, upload_bot_rr_index, bot_api_mode
     closed_clients = set()
     for item in upload_bots:
         client = item["client"]
@@ -171,6 +175,7 @@ async def close_bot_client():
     aiogram_bot = None
     upload_bots = []
     upload_bot_rr_index = 0
+    bot_api_mode = "cloud"
 
 
 def get_upload_bot_count():
@@ -185,15 +190,14 @@ def is_bot_client(client) -> bool:
     return any(item["client"] == client for item in upload_bots)
 
 
-def should_prefer_local_bot_api_upload():
-    sync_cfg = get_config()["sync"]
-    return bool(sync_cfg.get("prefer_local_bot_api", True) and has_local_bot_api_server())
+def is_using_local_bot_api() -> bool:
+    return bot_api_mode == "local" and has_local_bot_api_server()
 
 
 def should_upload_via_bot(file_size: int) -> bool:
     if aiogram_bot is None:
         return False
-    if should_prefer_local_bot_api_upload():
+    if is_using_local_bot_api():
         return True
     max_mb = float(get_config()["sync"].get("bot_upload_max_mb", 50) or 50)
     return file_size <= max_mb * 1024 * 1024
@@ -467,7 +471,7 @@ async def _resolve_realtime_upload_target(options: dict, file_sizes: list[int]):
     )
 
 
-async def _send_realtime_media_via_user(target_id, msg_type, file_path, text_html, reply_to_id, quote_data, label_prefix):
+async def _send_realtime_media_via_user(target_id, msg_type, file_path, text_html, reply_to_id, quote_data, label_prefix, source_item=None):
     if not getattr(pyro_user_app, "is_initialized", False):
         raise RuntimeError("实时同步使用辅助账号发送前，请先完成辅助账号登录")
     file_size = os.path.getsize(file_path)
@@ -483,7 +487,8 @@ async def _send_realtime_media_via_user(target_id, msg_type, file_path, text_htm
             ParseMode.HTML,
             reply_to_message_id=reply_to_id,
             quote_data=quote_data if reply_to_id else None,
-            progress=build_pyro_progress_callback(tracker, file_label, total_bytes=file_size),
+            progress=build_pyro_progress_callback(tracker, file_label, total_bytes=file_size, client=pyro_user_app),
+            source_item=source_item,
         ),
         action_label=label_prefix,
         log_tag="REALTIME_NETWORK_RETRY",
@@ -508,6 +513,7 @@ async def _send_realtime_media_group_via_user(target_id, downloaded_files, capti
         tracker,
         f"实时上传媒体组: {len(downloaded_files)} 项",
         total_bytes=total_size,
+        client=pyro_user_app,
     )
     sent_msgs = await execute_with_network_retry(
         lambda: pyro_user_app.send_media_group(**kwargs),
@@ -537,6 +543,7 @@ async def _send_realtime_media_upload(source_id, target_id, message, msg_type, t
                     reply_to_id,
                     quote_data,
                     f"实时媒体辅助回退 {message.message_id}",
+                    source_item=message,
                 )
 
             file_label = format_upload_label(msg_type, file_path)
@@ -553,6 +560,7 @@ async def _send_realtime_media_upload(source_id, target_id, message, msg_type, t
                         upload_target["parse_mode"],
                         reply_to_message_id=reply_to_id,
                         quote_data=quote_data if reply_to_id else None,
+                        source_item=message,
                     ),
                     action_label=f"实时媒体发送 {message.message_id}",
                     log_tag="REALTIME_NETWORK_RETRY",
@@ -583,6 +591,7 @@ async def _send_realtime_media_upload(source_id, target_id, message, msg_type, t
                         reply_to_id,
                         quote_data,
                         f"实时媒体辅助回退 {message.message_id}",
+                        source_item=message,
                     )
                 raise
     finally:
@@ -969,6 +978,11 @@ def init_user_client():
 async def _dispose_client(client):
     if not client:
         return
+    try:
+        if hasattr(client, "stop_transmission"):
+            client.stop_transmission()
+    except Exception:
+        pass
     try:
         if getattr(client, "is_initialized", False):
             await client.stop()

@@ -208,13 +208,21 @@ const LogPanel = {
     body(log) {
       return this.kind === "message" ? log.detail : log.msg;
     },
+    scrollToBottom() {
+      const panel = document.getElementById(this.panelId);
+      if (!panel) return;
+      panel.scrollTop = panel.scrollHeight;
+    },
   },
   template: `<app-card>
     <div class="mb-3">
       <h2 class="text-lg font-semibold">{{ title }}</h2>
       <p class="text-xs text-gray-500">{{ description }}</p>
       <div class="mt-3 flex items-center justify-between gap-3">
-        <button @click="$emit('export')" class="btn-secondary btn-inline !px-3 !py-1 text-xs">导出</button>
+        <div class="flex items-center gap-2">
+          <button @click="$emit('export')" class="btn-secondary btn-inline !px-3 !py-1 text-xs">导出</button>
+          <button @click="scrollToBottom" class="btn-secondary btn-inline !px-3 !py-1 text-xs">跳至底部</button>
+        </div>
         <button @click="$emit('clear')" class="btn-secondary btn-inline !px-3 !py-1 text-xs">清理</button>
       </div>
     </div>

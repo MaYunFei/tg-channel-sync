@@ -76,9 +76,10 @@ async def _send_json_single_via_user(target_id, media_type, media_path, caption,
             **({} if media_type == "sticker" else caption_kwargs),
             **({"reply_to_message_id": reply_to_id} if reply_to_id else {}),
             **spoiler_kwargs,
-            progress=build_pyro_progress_callback(tracker, file_label, total_bytes=os.path.getsize(media_path)),
+            progress=build_pyro_progress_callback(tracker, file_label, total_bytes=os.path.getsize(media_path), client=app),
         ),
         action_label=f"消息 -> 辅助账号重传 [{os.path.basename(media_path)}]",
+        stop_client=app,
     )   
 
 
@@ -94,6 +95,7 @@ async def _send_json_text_via_user(target_id, text, reply_to_id):
             **({"reply_to_message_id": reply_to_id} if reply_to_id else {}),
         ),
         action_label="文本消息 -> 辅助账号发送",
+        stop_client=app,
     )
 
 
@@ -119,12 +121,14 @@ async def _send_json_group_via_user(group, target_id, rewritten_captions, file_e
         tracker,
         f"上传媒体组: {len(file_entries)} 项",
         total_bytes=total_bytes,
+        client=app,
     )
     try:
         return await _execute_with_retry(
             lambda: app.send_media_group(**kwargs),
             action_label=f"媒体组 -> 辅助账号重传 [{len(file_entries)} 项]",
             retry_unknown_errors=False,
+            stop_client=app,
         )
     except Exception as exc:
         if isinstance(exc, SyncNetworkRetryExhaustedError):

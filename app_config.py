@@ -33,9 +33,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "add_external_source_header": False,
         "system_log_retention_limit": 1000,
         "message_log_retention_limit": 5000,
-        "clone_chunk_download_enabled": False,
-        "clone_chunk_download_workers": 4,
-        "prefer_local_bot_api": True,
         "bot_upload_max_mb": 50,
         "bot_rate_limit_enabled": False,
         "bot_rate_limit_gb": 10,
@@ -106,14 +103,12 @@ def _normalize_config(config: dict[str, Any]) -> dict[str, Any]:
     server["port"] = int(str(server.get("port", 8011) or 8011).strip() or 8011)
     server["auto_open_browser"] = bool(server.get("auto_open_browser", False))
 
+    sync.pop("prefer_local_bot_api", None)
     sync["default_delay"] = max(0.5, float(sync.get("default_delay", 5) or 5))
     sync["force_send"] = bool(sync.get("force_send", False))
     sync["add_external_source_header"] = bool(sync.get("add_external_source_header", False))
     sync["system_log_retention_limit"] = _normalize_int(sync.get("system_log_retention_limit", 1000), 1000, minimum=100)
     sync["message_log_retention_limit"] = _normalize_int(sync.get("message_log_retention_limit", 5000), 5000, minimum=100)
-    sync["clone_chunk_download_enabled"] = bool(sync.get("clone_chunk_download_enabled", False))
-    sync["clone_chunk_download_workers"] = _normalize_int(sync.get("clone_chunk_download_workers", 4), 4, minimum=1, maximum=8)
-    sync["prefer_local_bot_api"] = bool(sync.get("prefer_local_bot_api", True))
     sync["bot_upload_max_mb"] = max(1.0, float(sync.get("bot_upload_max_mb", 50) or 50))
     sync["bot_rate_limit_enabled"] = bool(sync.get("bot_rate_limit_enabled", False))
     sync["bot_rate_limit_gb"] = max(0.1, float(sync.get("bot_rate_limit_gb", 10) or 10))

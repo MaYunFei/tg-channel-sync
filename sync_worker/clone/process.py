@@ -59,12 +59,12 @@ from .helpers import (
     _clone_should_fallback_to_user,
     _download_media_thumbnail,
     _execute_with_clone_retry,
+    _execute_with_clone_retry_interruptibly,
     _is_chat_forwards_restricted,
     _is_request_entity_too_large,
     _is_topics_parse_error,
     _parse_retry_after_seconds,
 )
-from .raw_downloader import ChunkedDownloadFallback, download_media_in_chunks, supports_chunked_download
 from ..json_import import process_json_sync
 
 
@@ -104,26 +104,12 @@ async def _download_clone_media_item(
     msg,
     mode: str,
     *,
-    clone_chunk_download_enabled: bool,
-    clone_chunk_download_workers: int,
     progress_label: str,
     normal_download_semaphore=None,
 ):
     item_type, _ = get_msg_meta(msg, mode)
     download_target = _build_temp_download_path(msg, item_type)
     _set_group_download_status(msg.id, 0, 1, f"准备下载 {item_type} | 消息ID:{msg.id}")
-    if clone_chunk_download_enabled and supports_chunked_download(item_type):
-        try:
-            return await download_media_in_chunks(
-                app,
-                msg,
-                item_type,
-                download_target,
-                worker_count=clone_chunk_download_workers,
-                progress_label=progress_label,
-            )
-        except ChunkedDownloadFallback as exc:
-            await db.add_msg_log("CLONE_CHUNK_FALLBACK", f"消息ID:{msg.id} | 已回退普通下载: {exc}")
     async def _download_normally():
         return await execute_with_network_retry(
             lambda: app.download_media(
@@ -227,8 +213,6 @@ async def sync_single_message(
     hash_perturb=False,
     clone_fallback_to_user=True,
     include_external_source_header: bool = False,
-    clone_chunk_download_enabled: bool = False,
-    clone_chunk_download_workers: int = 4,
 ):
     msg_type, _ = get_msg_meta(msg, mode)
     has_media = msg_type != "text"
@@ -334,7 +318,7 @@ async def sync_single_message(
                 ).id
         else:
             if not has_media:
-                sent = await _execute_with_clone_retry(
+                sent = await _execute_with_clone_retry_interruptibly(
                     lambda: dynamic_send(
                         bot if sender == "bot" else app,
                         "text",
@@ -346,6 +330,7 @@ async def sync_single_message(
                         quote_data=quote_data if reply_to_id else None,
                     ),
                     action_label=f"单条消息 {msg.id}",
+                    stop_client=app if sender != "bot" else None,
                 )
                 sent_id = sent.message_id if sender == "bot" else sent.id
             else:
@@ -358,8 +343,6 @@ async def sync_single_message(
                             app,
                             msg,
                             mode,
-                            clone_chunk_download_enabled=clone_chunk_download_enabled,
-                            clone_chunk_download_workers=clone_chunk_download_workers,
                             progress_label="下载中",
                         )
                         if file_path:
@@ -400,7 +383,7 @@ async def sync_single_message(
                 parse_mode = upload_target["parse_mode"]
                 sent_id = None
                 bot_size_limit_hit = False
-                thumbnail_path = await _download_media_thumbnail(app, msg, msg_type) if actual_sender == "bot" and msg_type in {"video", "document"} else None
+                thumbnail_path = await _download_media_thumbnail(app, msg, msg_type) if msg_type in {"video", "document"} else None
 
                 for _ in range(3):
                     if sync_state["stop_requested"]:
@@ -410,7 +393,7 @@ async def sync_single_message(
                         tracker = UploadProgressTracker(f"上传中 [{upload_target['label']}]", file_size)
                         media_arg = ProgressFSInputFile(file_path, tracker, file_label) if actual_sender == "bot" else file_path
                         thumbnail_arg = FSInputFile(thumbnail_path) if actual_sender == "bot" and thumbnail_path and os.path.exists(thumbnail_path) else thumbnail_path
-                        sent = await _execute_with_clone_retry(
+                        sent = await _execute_with_clone_retry_interruptibly(
                             lambda: dynamic_send(
                                 client,
                                 msg_type,
@@ -420,10 +403,12 @@ async def sync_single_message(
                                 parse_mode,
                                 reply_to_message_id=reply_to_id,
                                 quote_data=quote_data if reply_to_id else None,
-                                progress=build_pyro_progress_callback(tracker, file_label, total_bytes=file_size) if actual_sender != "bot" else None,
+                                progress=build_pyro_progress_callback(tracker, file_label, total_bytes=file_size, client=client) if actual_sender != "bot" else None,
                                 thumbnail=thumbnail_arg,
+                                source_item=msg,
                             ),
                             action_label=f"单条媒体 {msg.id}",
+                            stop_client=client if actual_sender != "bot" else None,
                         )
                         sent_id = sent.message_id if actual_sender == "bot" else sent.id
                         if actual_sender == "bot":
@@ -485,7 +470,7 @@ async def sync_single_message(
                         try:
                             file_label = format_upload_label(msg_type, file_path)
                             tracker = UploadProgressTracker("上传中 [辅助账号回退]", file_size)
-                            sent = await _execute_with_clone_retry(
+                            sent = await _execute_with_clone_retry_interruptibly(
                                 lambda: dynamic_send(
                                     app,
                                     msg_type,
@@ -495,10 +480,12 @@ async def sync_single_message(
                                     ParseMode.HTML,
                                     reply_to_message_id=reply_to_id,
                                     quote_data=quote_data if reply_to_id else None,
-                                    progress=build_pyro_progress_callback(tracker, file_label, total_bytes=file_size),
+                                    progress=build_pyro_progress_callback(tracker, file_label, total_bytes=file_size, client=app),
                                     thumbnail=thumbnail_path,
+                                    source_item=msg,
                                 ),
                                 action_label=f"单条媒体辅助回退 {msg.id}",
+                                stop_client=app,
                             )
                             sent_id = sent.id
                             break
@@ -550,8 +537,6 @@ async def sync_media_group(
     hash_perturb=False,
     clone_fallback_to_user=True,
     include_external_source_header: bool = False,
-    clone_chunk_download_enabled: bool = False,
-    clone_chunk_download_workers: int = 4,
 ):
     if await update_state_and_check_skip(source_id, target_id, group[0].id, "[媒体组]", force_send=force_send):
         return
@@ -626,7 +611,7 @@ async def sync_media_group(
             if sync_state["stop_requested"]:
                 break
             try:
-                sem = asyncio.Semaphore(clone_chunk_download_workers)
+                sem = asyncio.Semaphore(4)
                 normal_download_semaphore = asyncio.Semaphore(1)
                 completed = 0
                 completed_lock = asyncio.Lock()
@@ -640,8 +625,6 @@ async def sync_media_group(
                             app,
                             m_item,
                             mode,
-                            clone_chunk_download_enabled=clone_chunk_download_enabled,
-                            clone_chunk_download_workers=clone_chunk_download_workers,
                             progress_label=f"组内下载 [{idx}/{total_items}]",
                             normal_download_semaphore=normal_download_semaphore,
                         )
@@ -770,10 +753,12 @@ async def sync_media_group(
                         tracker,
                         f"上传媒体组: {len(downloaded_files)} 项",
                         total_bytes=sum(file_sizes),
+                        client=client,
                     )
-                sent_msgs = await _execute_with_clone_retry(
+                sent_msgs = await _execute_with_clone_retry_interruptibly(
                     lambda: client.send_media_group(**send_kwargs),
                     action_label=f"媒体组 {group[0].id}",
+                    stop_client=client if actual_sender != "bot" else None,
                 )
                 for orig_m, new_m in zip(group, sent_msgs):
                     await record_success(source_id, target_id, orig_m.id, new_m.message_id if actual_sender == "bot" else new_m.id, force_send=force_send)
@@ -867,11 +852,13 @@ async def sync_media_group(
                 tracker,
                 f"上传媒体组: {len(downloaded_files)} 项",
                 total_bytes=sum(file_sizes),
+                client=app,
             )
             try:
-                sent_msgs = await _execute_with_clone_retry(
+                sent_msgs = await _execute_with_clone_retry_interruptibly(
                     lambda: app.send_media_group(**send_kwargs),
                     action_label=f"媒体组辅助回退 {first_id}",
+                    stop_client=app,
                 )
                 for orig_m, new_m in zip(group, sent_msgs):
                     await record_success(source_id, target_id, orig_m.id, new_m.id, force_send=force_send)
@@ -965,8 +952,6 @@ async def process_master_sync(
     settings = await db.get_all_settings()
     sync_config = get_config().get("sync", {})
     include_external_source_header = bool(sync_config.get("add_external_source_header", False))
-    clone_chunk_download_enabled = bool(sync_config.get("clone_chunk_download_enabled", False))
-    clone_chunk_download_workers = min(8, max(1, int(sync_config.get("clone_chunk_download_workers", 4) or 4)))
     if not include_external_source_header:
         legacy_value = str(getattr(settings, "get", lambda *_: "")("add_external_source_header", "") or "").strip().lower()
         include_external_source_header = legacy_value in {"1", "true", "yes", "on"}
@@ -982,8 +967,6 @@ async def process_master_sync(
     if mode == "clone":
         await clear_temp_dir_files()
         await db.add_log("INFO", "已清空 temp，准备下载")
-        if clone_chunk_download_enabled:
-            await db.add_log("INFO", f"下载重传已启用分块并发下载 | 并发下载数: {clone_chunk_download_workers}")
 
     final_status = "completed"
     try:
@@ -1033,8 +1016,6 @@ async def process_master_sync(
                             hash_perturb=hash_perturb,
                             clone_fallback_to_user=clone_fallback_to_user,
                             include_external_source_header=include_external_source_header,
-                            clone_chunk_download_enabled=clone_chunk_download_enabled,
-                            clone_chunk_download_workers=clone_chunk_download_workers,
                         )
                     else:
                         await sync_media_group(
@@ -1050,8 +1031,6 @@ async def process_master_sync(
                             hash_perturb=hash_perturb,
                             clone_fallback_to_user=clone_fallback_to_user,
                             include_external_source_header=include_external_source_header,
-                            clone_chunk_download_enabled=clone_chunk_download_enabled,
-                            clone_chunk_download_workers=clone_chunk_download_workers,
                         )
         else:
             await process_json_sync(

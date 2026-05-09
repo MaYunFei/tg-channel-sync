@@ -4,6 +4,7 @@ from aiogram.types import ReplyParameters
 
 import bot_engine
 
+from ..core.media import extract_upload_metadata
 from ..core.text import normalize_bot_html, normalize_pyro_html
 
 
@@ -20,6 +21,7 @@ async def dynamic_send(
     progress_args=None,
     thumbnail=None,
     has_spoiler=False,
+    source_item=None,
 ):
     method_name = "send_message" if msg_type == "text" else f"send_{msg_type}"
     method = getattr(client, method_name, None) or getattr(client, "send_document")
@@ -45,13 +47,12 @@ async def dynamic_send(
     elif msg_type != "text":
         kwargs["caption"] = normalize_bot_html(caption) if bot_engine.is_bot_client(client) else normalize_pyro_html(caption)
         kwargs[msg_type if hasattr(client, method_name) else "document"] = file_ref
+        kwargs.update(extract_upload_metadata(source_item, msg_type))
         if has_spoiler and msg_type in {"photo", "video", "animation"}:
             kwargs["has_spoiler"] = True
         if thumbnail is not None:
             if bot_engine.is_bot_client(client):
                 kwargs["thumbnail"] = thumbnail
-                if msg_type == "video":
-                    kwargs["supports_streaming"] = True
             else:
                 kwargs["thumb"] = thumbnail
     else:

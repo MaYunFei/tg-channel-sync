@@ -39,8 +39,9 @@
     try {
       response = await fetch(url, init);
     } catch (error) {
-      return createErrorPayload(error && error.message ? error.message : "网络请求失败", {
+      return createErrorPayload("无法连接到后端", {
         network_error: true,
+        original_message: error && error.message ? error.message : "Failed to fetch",
       });
     }
 

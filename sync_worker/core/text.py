@@ -11,6 +11,12 @@ PYRO_HTML_TAG_ALIASES = (
     (re.compile(r"<(/?)tg-spoiler>"), r"<\1spoiler>"),
 )
 TEXT_SPOILER_RE = re.compile(r"<(/?)(?:tg-)?spoiler\b", re.IGNORECASE)
+DEPRECATED_FORWARD_KEYS = {
+    "forward_from_message_id",
+    "forward_from_chat",
+    "forward_from",
+    "forward_sender_name",
+}
 
 
 def _message_value(msg, key, default=None):
@@ -25,6 +31,11 @@ def _message_value(msg, key, default=None):
     pydantic_extra = getattr(msg, "__pydantic_extra__", None)
     if isinstance(pydantic_extra, dict) and key in pydantic_extra:
         return pydantic_extra.get(key, default)
+    if key in DEPRECATED_FORWARD_KEYS:
+        class_value = vars(type(msg)).get(key, default)
+        if class_value is not default and not hasattr(class_value, "__get__"):
+            return class_value
+        return default
     return getattr(msg, key, default)
 
 

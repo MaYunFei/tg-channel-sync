@@ -44,6 +44,44 @@ def get_media_reference(msg, msg_type):
     return getattr(media_obj, "file_id", None) if media_obj else None
 
 
+def extract_upload_metadata(item, msg_type):
+    if not item or msg_type == "text":
+        return {}
+
+    if isinstance(item, dict):
+        media_obj = item
+    else:
+        media_obj = getattr(item, msg_type, None) or item
+
+    metadata = {}
+
+    def _copy_number(field):
+        value = getattr(media_obj, field, None) if not isinstance(media_obj, dict) else media_obj.get(field)
+        if value is not None:
+            metadata[field] = value
+
+    def _copy_text(field):
+        value = getattr(media_obj, field, None) if not isinstance(media_obj, dict) else media_obj.get(field)
+        if value:
+            metadata[field] = value
+
+    if msg_type == "video":
+        _copy_number("duration")
+        _copy_number("width")
+        _copy_number("height")
+        metadata["supports_streaming"] = True
+    elif msg_type == "animation":
+        _copy_number("duration")
+        _copy_number("width")
+        _copy_number("height")
+    elif msg_type == "audio":
+        _copy_number("duration")
+        _copy_text("performer")
+        _copy_text("title")
+
+    return metadata
+
+
 def get_reply_source_msg_id(msg, mode):
     if mode == "json":
         return msg.get("reply_to_message_id")

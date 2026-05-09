@@ -184,7 +184,16 @@ async def _initialize_clients_in_background() -> None:
     try:
         bot = loaded_bot_engine.init_bot_client()
         if bot and not SHUTDOWN_EVENT.is_set():
-            me = await bot.get_me()
+            try:
+                me = await bot.get_me()
+            except Exception as exc:
+                if loaded_bot_engine.has_local_bot_api_server() and loaded_bot_engine.is_using_local_bot_api():
+                    await db.add_sys_log("WARNING", f"BOT_API_BASE_URL 不可用，已回退官方 Bot API: {exc}")
+                    await loaded_bot_engine.close_bot_client()
+                    bot = loaded_bot_engine.init_bot_client(use_local_api=False)
+                    me = await bot.get_me()
+                else:
+                    raise
             refresh_app_info({"name": me.first_name, "username": me.username, "status": STATUS_CONNECTED})
             polling_task = asyncio.create_task(
                 loaded_bot_engine.dp.start_polling(

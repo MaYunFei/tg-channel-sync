@@ -163,16 +163,6 @@ const SettingsPanel = {
   components:{ AppCard, FieldBadge, FieldGroup, ActionBar, BotApiHint, UserAuthPanel, SettingSectionNav, SettingGroup, ToggleField },
   template:`
     <div class="settings-shell">
-      <section class="settings-page-header">
-        <setting-section-nav :items="[
-          { id: 'settings-basic', label: '基础' },
-          { id: 'settings-sync', label: '同步' },
-          { id: 'settings-logs', label: '日志' },
-          { id: 'settings-account', label: '账号' },
-          { id: 'settings-actions', label: '操作' }
-        ]"></setting-section-nav>
-      </section>
-
       <app-card id="settings-basic" class="settings-section-card">
         <div class="settings-section-header">
           <div class="settings-section-title-row">
@@ -280,12 +270,6 @@ const SettingsPanel = {
                 :checked="config.sync.add_external_source_header"
                 @update:checked="config.sync.add_external_source_header = $event"
               ></toggle-field>
-              <toggle-field
-                label="下载重传优先使用本地 Bot API"
-                description="优先走本地 Bot API 上传，适合大文件或高频上传场景。"
-                :checked="config.sync.prefer_local_bot_api"
-                @update:checked="config.sync.prefer_local_bot_api = $event"
-              ></toggle-field>
             </div>
           </setting-group>
 
@@ -293,17 +277,6 @@ const SettingsPanel = {
             title="上传与下载参数"
           >
             <div class="toggle-grid">
-              <toggle-field
-                label="启用分块并发下载"
-                description="仅影响下载重传模式的下载阶段。"
-                :checked="config.sync.clone_chunk_download_enabled"
-                @update:checked="config.sync.clone_chunk_download_enabled = $event"
-              ></toggle-field>
-              <div :class="{ 'opacity-60': !config.sync.clone_chunk_download_enabled }">
-                <field-group label="并发下载数" hint="部分媒体会自动回退为普通下载。">
-                  <input v-model="config.sync.clone_chunk_download_workers" type="number" step="1" min="1" max="8" class="input-box">
-                </field-group>
-              </div>
               <field-group label="未启用本地 Bot API 时的单文件上限（MB）">
                 <input v-model="config.sync.bot_upload_max_mb" type="number" step="1" min="1" class="input-box">
               </field-group>
@@ -387,7 +360,7 @@ const SettingsPanel = {
 
 createApp({
   components:{ SetupWizard, StatusOverview, ChannelMapping, SyncPanel, LogViewer, SettingsPanel, GlobalFilters, ToastBanner },
-  data(){ return { currentView:"home", appInfo:{ bot:{}, user:{} }, mappings:{ mappings:[], grouped_mappings:[] }, filterRules:[], newFilter:{ rule_type:"replace", pattern:"", replacement:"", is_case_sensitive:0 }, settings:{ sync_text:"1", sync_photo:"1", sync_video:"1", sync_document:"1", sync_audio:"1", sync_voice:"1", sync_sticker:"1", sync_gif:"1" }, configForm:{ telegram:{ bot_token:"", extra_bot_tokens:"", api_id:"", api_hash:"", bot_api_base_url:"" }, proxy:{ enabled:false, host:"127.0.0.1", port:7897, username:"", password:"" }, server:{ host:"127.0.0.1", port:8011, auto_open_browser:true }, sync:{ default_delay:5, force_send:false, add_external_source_header:false, system_log_retention_limit:1000, message_log_retention_limit:5000, clone_chunk_download_enabled:false, clone_chunk_download_workers:4, prefer_local_bot_api:true, bot_upload_max_mb:50, bot_rate_limit_enabled:false, bot_rate_limit_gb:10, bot_rate_limit_window_hours:24, bot_rate_limit_cooldown_minutes:300, realtime_sender:"bot", realtime_fallback_to_user:true, realtime_hash_perturb:false }, app:{ portable_mode:true, log_level:"INFO" } }, setupStatus:{ needs_setup:false }, syncForm:{ mode:"api", sender:"bot", source_id:"", target_id:"", start_id:"", end_id:"", json_path:"", json_source_username:"", json_media_group_window_seconds:3, delay:5, force_send:"0", hash_perturb:"0", clone_fallback_to_user:"1" }, syncStatus:{ is_syncing:false, mode:"", total:0, current:0, skipped:0 }, userAuth:{ status:"idle", status_label:"未登录", awaiting_code:false, awaiting_password:false, phone_number:"", password_hint:"", send_code_cooldown:0 }, versionInfo:{ status:"idle", current_version:"", latest_version:"", up_to_date:false, url:"https://github.com/RRHTY/tg-channel-sync" }, sendCodeCooldown:0, sendCodeTimer:null, authSubmitting:false, stopping:false, serverAction:"", restartPolling:null, sysLogs:[], msgLogs:[], sseConnection:null, configSaving:false, notice:{ message:"", type:"info" }, noticeTimer:null }; },
+  data(){ return { currentView:"home", appInfo:{ bot:{}, user:{} }, mappings:{ mappings:[], grouped_mappings:[] }, filterRules:[], newFilter:{ rule_type:"replace", pattern:"", replacement:"", is_case_sensitive:0 }, settings:{ sync_text:"1", sync_photo:"1", sync_video:"1", sync_document:"1", sync_audio:"1", sync_voice:"1", sync_sticker:"1", sync_gif:"1" }, configForm:{ telegram:{ bot_token:"", extra_bot_tokens:"", api_id:"", api_hash:"", bot_api_base_url:"" }, proxy:{ enabled:false, host:"127.0.0.1", port:7897, username:"", password:"" }, server:{ host:"127.0.0.1", port:8011, auto_open_browser:true }, sync:{ default_delay:5, force_send:false, add_external_source_header:false, system_log_retention_limit:1000, message_log_retention_limit:5000, bot_upload_max_mb:50, bot_rate_limit_enabled:false, bot_rate_limit_gb:10, bot_rate_limit_window_hours:24, bot_rate_limit_cooldown_minutes:300, realtime_sender:"bot", realtime_fallback_to_user:true, realtime_hash_perturb:false }, app:{ portable_mode:true, log_level:"INFO" } }, setupStatus:{ needs_setup:false }, syncForm:{ mode:"api", sender:"bot", source_id:"", target_id:"", start_id:"", end_id:"", json_path:"", json_source_username:"", json_media_group_window_seconds:3, delay:5, force_send:"0", hash_perturb:"0", clone_fallback_to_user:"1" }, syncStatus:{ is_syncing:false, mode:"", total:0, current:0, skipped:0 }, userAuth:{ status:"idle", status_label:"未登录", awaiting_code:false, awaiting_password:false, phone_number:"", password_hint:"", send_code_cooldown:0 }, versionInfo:{ status:"idle", current_version:"", latest_version:"", up_to_date:false, url:"https://github.com/RRHTY/tg-channel-sync" }, sendCodeCooldown:0, sendCodeTimer:null, authSubmitting:false, stopping:false, serverAction:"", restartPolling:null, sysLogs:[], msgLogs:[], sseConnection:null, configSaving:false, notice:{ message:"", type:"info" }, noticeTimer:null }; },
   async mounted(){
     this.startSendCodeTimer();
     try {

@@ -246,7 +246,7 @@ class SyncServiceTests(unittest.IsolatedAsyncioTestCase):
 
         mock_add_log.assert_any_await("INFO", "任务运行完毕：JSON | 已处理 0 / 0 | 跳过 0")
 
-    async def test_sync_single_message_clone_uses_chunk_downloader_when_enabled(self):
+    async def test_sync_single_message_clone_downloads_before_reupload(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             download_path = Path(temp_dir) / "demo.bin"
             download_path.write_bytes(b"doc-bytes")
@@ -262,11 +262,11 @@ class SyncServiceTests(unittest.IsolatedAsyncioTestCase):
                  patch("sync_worker.clone.process.rewrite_message_links", AsyncMock(return_value=("", 0))), \
                  patch("sync_worker.clone.process.has_media_spoiler", return_value=False), \
                  patch("sync_worker.clone.process.has_text_spoiler", return_value=False), \
-                 patch("sync_worker.clone.process.download_media_in_chunks", AsyncMock(return_value=str(download_path))) as mock_chunk_download, \
+                 patch("sync_worker.clone.process.execute_with_network_retry", AsyncMock(return_value=str(download_path))) as mock_download, \
                  patch("sync_worker.clone.process.prepare_media_for_send", AsyncMock(return_value=str(download_path))), \
                  patch("sync_worker.clone.process.resolve_upload_target", Mock(return_value=object())), \
                  patch("sync_worker.clone.process.safe_execute", AsyncMock(return_value={"sender": "user", "client": fake_app, "parse_mode": history.ParseMode.HTML, "label": "辅助账号"})), \
-                 patch("sync_worker.clone.process._execute_with_clone_retry", AsyncMock(return_value=fake_sent)), \
+                 patch("sync_worker.clone.process._execute_with_clone_retry_interruptibly", AsyncMock(return_value=fake_sent)), \
                  patch("sync_worker.clone.process.dynamic_send", AsyncMock()), \
                  patch("sync_worker.clone.process.record_success", AsyncMock()) as mock_record_success, \
                  patch("sync_worker.clone.process.db.add_msg_log", AsyncMock()):
@@ -280,75 +280,27 @@ class SyncServiceTests(unittest.IsolatedAsyncioTestCase):
                     msg,
                     0,
                     False,
-                    clone_chunk_download_enabled=True,
-                    clone_chunk_download_workers=4,
                 )
 
-            mock_chunk_download.assert_awaited_once()
-            fake_app.download_media.assert_not_awaited()
+            mock_download.assert_awaited()
             mock_record_success.assert_awaited_once_with(-100123, -100456, 7, 101, force_send=False)
 
-    async def test_download_clone_media_item_falls_back_to_normal_download_for_known_chunk_fallback(self):
+    async def test_download_clone_media_item_uses_normal_download(self):
         fake_app = type("FakeApp", (), {"download_media": AsyncMock(return_value="normal.bin")})()
         msg = type("Msg", (), {"id": 9, "document": type("Doc", (), {"file_id": "x", "file_size": 10})()})()
 
         with patch("sync_worker.clone.process.get_msg_meta", return_value=("document", "sync_document")), \
              patch("sync_worker.clone.process._build_temp_download_path", return_value="temp.bin"), \
-             patch("sync_worker.clone.process.download_media_in_chunks", AsyncMock(side_effect=history.ChunkedDownloadFallback("LIMIT_INVALID"))), \
-             patch("sync_worker.clone.process.execute_with_network_retry", AsyncMock(return_value="normal.bin")) as mock_download, \
-             patch("sync_worker.clone.process.db.add_msg_log", AsyncMock()) as mock_add_msg_log:
+             patch("sync_worker.clone.process.execute_with_network_retry", AsyncMock(return_value="normal.bin")) as mock_download:
             result = await history._download_clone_media_item(
                 fake_app,
                 msg,
                 "clone",
-                clone_chunk_download_enabled=True,
-                clone_chunk_download_workers=4,
                 progress_label="组内下载 [1/2]",
             )
 
         self.assertEqual(result, "normal.bin")
         mock_download.assert_awaited_once()
-        mock_add_msg_log.assert_awaited_once()
-
-    async def test_download_clone_media_item_propagates_non_fallback_chunk_errors(self):
-        fake_app = type("FakeApp", (), {"download_media": AsyncMock()})()
-        msg = type("Msg", (), {"id": 11, "video": type("Video", (), {"file_id": "x", "file_size": 10})()})()
-
-        with patch("sync_worker.clone.process.get_msg_meta", return_value=("video", "sync_video")), \
-             patch("sync_worker.clone.process._build_temp_download_path", return_value="temp.bin"), \
-             patch("sync_worker.clone.process.download_media_in_chunks", AsyncMock(side_effect=RuntimeError("network boom"))):
-            with self.assertRaises(RuntimeError):
-                await history._download_clone_media_item(
-                    fake_app,
-                    msg,
-                    "clone",
-                    clone_chunk_download_enabled=True,
-                    clone_chunk_download_workers=4,
-                    progress_label="组内下载 [1/2]",
-                )
-
-    async def test_download_clone_media_item_skips_chunk_attempt_for_unsupported_type(self):
-        fake_app = type("FakeApp", (), {"download_media": AsyncMock(return_value="normal.bin")})()
-        msg = type("Msg", (), {"id": 12, "sticker": object()})()
-
-        with patch("sync_worker.clone.process.get_msg_meta", return_value=("sticker", "sync_sticker")), \
-             patch("sync_worker.clone.process._build_temp_download_path", return_value="temp.bin"), \
-             patch("sync_worker.clone.process.download_media_in_chunks", AsyncMock()) as mock_chunk_download, \
-             patch("sync_worker.clone.process.execute_with_network_retry", AsyncMock(return_value="normal.bin")) as mock_download, \
-             patch("sync_worker.clone.process.db.add_msg_log", AsyncMock()) as mock_add_msg_log:
-            result = await history._download_clone_media_item(
-                fake_app,
-                msg,
-                "clone",
-                clone_chunk_download_enabled=True,
-                clone_chunk_download_workers=4,
-                progress_label="组内下载 [1/2]",
-            )
-
-        self.assertEqual(result, "normal.bin")
-        mock_chunk_download.assert_not_awaited()
-        mock_download.assert_awaited_once()
-        mock_add_msg_log.assert_not_awaited()
 
     async def test_process_master_sync_logs_failed_summary_for_network_abort(self):
         async def _raise_with_progress(*args, **kwargs):
