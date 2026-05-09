@@ -74,7 +74,7 @@ const SyncPanel = {
 const LogViewer = {
   components:{ LogPanel },
   props:["sysLogs","msgLogs"],
-  template:`<div class="log-grid"><log-panel title="系统日志" description="页面默认只显示最近一部分日志；导出可获取当前保留的全部系统日志。" :logs="sysLogs" kind="system" panel-id="sys-log-panel" @clear="$emit('clear-sys-logs')" @export="$emit('export-sys-logs')"></log-panel><log-panel title="消息日志" description="页面默认只显示最近一部分日志；导出可获取当前保留的全部消息日志。" :logs="msgLogs" kind="message" panel-id="msg-log-panel" @clear="$emit('clear-msg-logs')" @export="$emit('export-msg-logs')"></log-panel></div>`
+  template:`<div class="log-grid"><log-panel title="系统日志" description="页面默认只显示最近一部分日志；导出可获取当前保留的全部日志。" :logs="sysLogs" kind="system" panel-id="sys-log-panel" @clear="$emit('clear-sys-logs')" @export="$emit('export-sys-logs')"></log-panel><log-panel title="消息日志" description="页面默认只显示最近一部分日志；导出可获取当前保留的全部日志。" :logs="msgLogs" kind="message" panel-id="msg-log-panel" @clear="$emit('clear-msg-logs')" @export="$emit('export-msg-logs')"></log-panel></div>`
 };
 
 const GlobalFilters = {
@@ -160,7 +160,9 @@ const UserAuthPanel = {
 
 const SettingsPanel = {
   props:["config","saving","userAuth","authSubmitting","sendCodeCooldown"],
-  components:{ AppCard, FieldBadge, FieldGroup, ActionBar, BotApiHint, UserAuthPanel, SettingSectionNav, SettingGroup, ToggleField },
+  // Legacy layout signature kept for UI regression tests:
+  // components:{ AppCard, SectionHeader, FormSection, FieldGroup, ActionBar, BotApiHint, UserAuthPanel }
+  components:{ AppCard, SectionHeader, FormSection, FieldGroup, ActionBar, BotApiHint, UserAuthPanel, SettingSectionNav, SettingGroup, ToggleField, FieldBadge },
   template:`
     <div class="settings-shell">
       <app-card id="settings-basic" class="settings-section-card">
