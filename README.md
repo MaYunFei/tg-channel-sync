@@ -8,13 +8,13 @@
 **频道内容**
 
 ![频道内容预览 1](https://github.com/user-attachments/assets/7d25932c-2cce-4dea-9879-fde967e2fc21 "频道内容预览 1")
-`<img width="1322" height="776" alt="image" src="https://github.com/user-attachments/assets/31141f35-8756-4b69-98e1-7264a5ded53b" />`
+<img width="1322" height="776" alt="image" src="https://github.com/user-attachments/assets/31141f35-8756-4b69-98e1-7264a5ded53b" />
 
 **Web 页面**
 
-|                                                                   首页                                                                   |                                                      设置                                                      |
-| :--------------------------------------------------------------------------------------------------------------------------------------: | :------------------------------------------------------------------------------------------------------------: |
-| `<img width="1696" height="1904" alt="image" src="https://github.com/user-attachments/assets/60f20743-9955-4a63-9e23-b133c30a6870" />` | ![Web 页面预览 2](https://github.com/user-attachments/assets/f7dd89aa-742e-4002-a566-2271799044cc "Web 页面预览 2") |
+| 首页 | 设置 |
+| :------: | :------: |
+| <img width="909" height="1368" alt="9ad40504818ef0db25a80992ff046bf3" src="https://github.com/user-attachments/assets/a166c8f4-da75-4ee5-bdb6-3941deb9ed6c" />| <img width="1250" height="2247" alt="391a9af42d8e1a2585397b1e824a8089" src="https://github.com/user-attachments/assets/b7ee5d3c-1d7b-40a8-925b-6332ab18ce6a" />|
 
 ---
 
