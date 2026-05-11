@@ -69,10 +69,13 @@ async def _send_json_single_via_user(target_id, media_type, media_path, caption,
         raise JsonSyncFatalError("Bot 上传体积超限，且辅助账号未登录，无法回退重传")
     spoiler_kwargs = {"has_spoiler": True} if has_spoiler and media_type in {"photo", "video", "animation"} else {}
     caption_kwargs = {"caption": caption, "parse_mode": ParseMode.HTML} if caption else {}
+    media_kwargs = {"sticker": _pyro_file_ref(media_path), "emoji": ""} if media_type == "sticker" else {
+        media_type if hasattr(app, f"send_{media_type}") else "document": _pyro_file_ref(media_path)
+    }
     return await _execute_with_retry(
         lambda: getattr(app, f"send_{media_type}", app.send_document)(
             chat_id=target_id,
-            **({"sticker": _pyro_file_ref(media_path)} if media_type == "sticker" else {media_type if hasattr(app, f"send_{media_type}") else "document": _pyro_file_ref(media_path)}),
+            **media_kwargs,
             **({} if media_type == "sticker" else caption_kwargs),
             **({"reply_to_message_id": reply_to_id} if reply_to_id else {}),
             **spoiler_kwargs,

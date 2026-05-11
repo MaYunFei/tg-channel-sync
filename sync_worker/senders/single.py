@@ -42,6 +42,8 @@ async def dynamic_send(
         kwargs["reply_to_message_id"] = reply_to_message_id
     if msg_type == "sticker":
         kwargs["sticker"] = file_ref
+        if not bot_engine.is_bot_client(client):
+            kwargs["emoji"] = ""
     elif msg_type != "text":
         kwargs["caption"] = normalize_bot_html(caption) if bot_engine.is_bot_client(client) else normalize_pyro_html(caption)
         kwargs[msg_type if hasattr(client, method_name) else "document"] = file_ref

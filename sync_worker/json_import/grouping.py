@@ -14,6 +14,8 @@ def _json_message_timestamp(msg: dict) -> int:
 
 
 def _json_group_family(msg: dict) -> str | None:
+    if msg.get("media_type") == "video_file" and msg.get("file"):
+        return "document"
     msg_type, _ = get_msg_meta(msg, "json")
     if msg_type in {"photo", "video", "animation"}:
         return "visual"

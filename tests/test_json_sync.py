@@ -15,6 +15,7 @@ class FakeSentMessage:
 class JsonSyncTests(unittest.IsolatedAsyncioTestCase):
     def test_parse_retry_after_seconds(self):
         self.assertEqual(json_sync._parse_retry_after_seconds(Exception("retry after 21")), 21)
+        self.assertEqual(json_sync._parse_retry_after_seconds(Exception("A wait of 123 seconds is required.")), 123)
         self.assertIsNone(json_sync._parse_retry_after_seconds(Exception("other error")))
 
     def test_is_request_entity_too_large(self):
@@ -57,6 +58,49 @@ class JsonSyncTests(unittest.IsolatedAsyncioTestCase):
         kwargs = mock_app.send_photo.await_args.kwargs
         self.assertNotIn("caption", kwargs)
         self.assertNotIn("parse_mode", kwargs)
+
+    async def test_send_json_single_via_user_passes_empty_emoji_for_sticker(self):
+        with patch("sync_worker.json_import.process.bot_engine.pyro_user_app") as mock_app:
+            mock_app.is_initialized = True
+            mock_app.send_sticker = AsyncMock(return_value=type("Sent", (), {"id": 1002})())
+            with patch("sync_worker.json_import.process.os.path.getsize", return_value=3):
+                await json_sync._send_json_single_via_user(
+                    -100456,
+                    "sticker",
+                    "fake.webp",
+                    None,
+                    None,
+                    json_sync.SharedUploadProgressTracker("上传中", 3),
+                    "上传贴纸: fake.webp",
+                )
+
+        kwargs = mock_app.send_sticker.await_args.kwargs
+        self.assertEqual(kwargs["emoji"], "")
+
+    async def test_execute_with_retry_retries_pyrogram_wait_phrase(self):
+        attempts = {"count": 0}
+
+        async def flaky_call():
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                raise Exception("Telegram says: [420 FLOOD_WAIT_X] Pyrogram thinks: A wait of 123 seconds is required.")
+            return "ok"
+
+        async def passthrough(factory, **_kwargs):
+            return await factory()
+
+        with patch("sync_worker.json_import.helpers.execute_with_network_retry", AsyncMock(side_effect=passthrough)), \
+             patch("sync_worker.json_import.helpers.db.add_msg_log", AsyncMock()) as mock_add_msg_log, \
+             patch("sync_worker.json_import.helpers.asyncio.sleep", AsyncMock()) as mock_sleep:
+            result = await json_sync._execute_with_retry(
+                flaky_call,
+                action_label="文本消息 -> 辅助账号发送",
+            )
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(attempts["count"], 2)
+        mock_sleep.assert_awaited_once_with(124)
+        mock_add_msg_log.assert_any_await("JSON_RETRY", "文本消息 -> 辅助账号发送 | 遇到频控，等待 124 秒后重试")
 
     def test_group_json_messages_groups_documents_without_mixing_visual_media(self):
         messages = [
@@ -241,6 +285,46 @@ class JsonSyncTests(unittest.IsolatedAsyncioTestCase):
 
             media = mock_send.await_args.args[1]
             self.assertEqual([item.caption for item in media], ["第一条说明", "第二条说明"])
+
+    async def test_send_json_media_group_keeps_video_file_as_documents(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            videos_dir = Path(temp_dir) / "video_files"
+            videos_dir.mkdir()
+            for name in ["a.mp4", "b.mp4"]:
+                (videos_dir / name).write_bytes(b"mp4")
+
+            group = [
+                {
+                    "id": 1,
+                    "type": "message",
+                    "date_unixtime": "1",
+                    "media_type": "video_file",
+                    "file": "video_files/a.mp4",
+                    "text": "第一条说明",
+                },
+                {
+                    "id": 2,
+                    "type": "message",
+                    "date_unixtime": "2",
+                    "media_type": "video_file",
+                    "file": "video_files/b.mp4",
+                    "text": "第二条说明",
+                },
+            ]
+
+            mock_send = AsyncMock(return_value=[FakeSentMessage(1001), FakeSentMessage(1002)])
+            with patch("sync_worker.json_import.process.update_state_and_check_skip", AsyncMock(return_value=False)), \
+                 patch("sync_worker.json_import.process.resolve_reply_target", AsyncMock(return_value=None)), \
+                 patch("sync_worker.json_import.process.rewrite_message_links", AsyncMock(side_effect=lambda text, *_: (text, 0))), \
+                 patch("sync_worker.json_import.process.record_success", AsyncMock()), \
+                 patch("sync_worker.json_import.process.db.add_msg_log", AsyncMock()), \
+                 patch("sync_worker.json_import.process.bot_engine.aiogram_bot") as mock_bot:
+                mock_bot.send_media_group = mock_send
+
+                await json_sync.send_json_media_group(group, -100456, temp_dir, 0, False, {}, "bot", True)
+
+            media = mock_send.await_args.args[1]
+            self.assertTrue(all(item.__class__.__name__ == "InputMediaDocument" for item in media))
 
     async def test_send_json_media_group_keeps_media_spoiler(self):
         with tempfile.TemporaryDirectory() as temp_dir:

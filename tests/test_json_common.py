@@ -78,7 +78,7 @@ class JsonCommonTests(unittest.TestCase):
         msg_animation = {"media_type": "animation", "file": "video_files/b.mp4"}
         msg_sticker = {"media_type": "sticker", "file": "stickers/a.tgs"}
 
-        self.assertEqual(resolve_json_media(msg_video, "X")[1], "video")
+        self.assertEqual(resolve_json_media(msg_video, "X")[1], "document")
         self.assertEqual(resolve_json_media(msg_animation, "X")[1], "animation")
         self.assertEqual(resolve_json_media(msg_sticker, "X")[1], "sticker")
 

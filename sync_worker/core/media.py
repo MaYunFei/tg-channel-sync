@@ -85,7 +85,7 @@ def resolve_json_media(msg, json_dir):
         if media_type == "sticker":
             return file_path, "sticker", None
         if media_type == "video_file":
-            return file_path, "video", None
+            return file_path, "document", None
         if media_type == "animation":
             return file_path, "animation", None
         if media_type == "audio_file":

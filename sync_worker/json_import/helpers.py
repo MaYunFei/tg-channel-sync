@@ -16,7 +16,11 @@ from ..senders import resolve_upload_target, should_fallback_to_user
 
 
 JSON_MEDIA_GROUP_WINDOW_SECONDS = 3
-RETRY_AFTER_RE = re.compile(r"retry after\s+(?P<seconds>\d+)", re.IGNORECASE)
+RETRY_AFTER_PATTERNS = (
+    re.compile(r"retry after\s+(?P<seconds>\d+)", re.IGNORECASE),
+    re.compile(r"a wait of\s+(?P<seconds>\d+)\s+seconds?\s+is required", re.IGNORECASE),
+    re.compile(r"flood_wait(?:_x)?[^\d]*(?P<seconds>\d+)", re.IGNORECASE),
+)
 JSON_UPLOAD_LABELS = {
     "photo": "上传图片",
     "video": "上传视频",
@@ -77,10 +81,12 @@ def _format_media_label(media_type: str | None, media_path: str, *, index: int |
 
 
 def _parse_retry_after_seconds(exc: Exception) -> int | None:
-    match = RETRY_AFTER_RE.search(str(exc))
-    if not match:
-        return None
-    return max(1, int(match.group("seconds")))
+    text = str(exc)
+    for pattern in RETRY_AFTER_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            return max(1, int(match.group("seconds")))
+    return None
 
 
 def _is_request_entity_too_large(exc: Exception) -> bool:
