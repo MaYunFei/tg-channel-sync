@@ -26,12 +26,26 @@ const FormSection = {
 };
 
 const FieldGroup = {
-  props: ["label", "hint", "labelClass", "hintClass", "wrapperClass"],
+  props: ["label", "hint", "labelClass", "hintClass", "wrapperClass", "badge", "badgeClass"],
   template: `<div :class="wrapperClass || 'field-group'">
-    <label v-if="label" :class="labelClass || 'field-label'">{{ label }}</label>
+    <div v-if="label || badge" class="field-label-row">
+      <label v-if="label" :class="labelClass || 'field-label'">{{ label }}</label>
+      <span
+        v-if="badge"
+        :class="badgeClass || 'field-badge'"
+      >{{ badge }}</span>
+    </div>
     <slot></slot>
     <p v-if="hint" :class="hintClass || 'field-hint'">{{ hint }}</p>
   </div>`,
+};
+
+const FieldBadge = {
+  props: ["text", "tone"],
+  template: `<span
+    class="field-badge"
+    :class="tone === 'muted' ? 'field-badge-muted' : ''"
+  >{{ text }}</span>`,
 };
 
 const ActionBar = {
@@ -50,6 +64,65 @@ const ToastBanner = {
 const EmptyState = {
   props: ["text"],
   template: `<div class="rounded border border-dashed p-4 text-center text-gray-400">{{ text || '暂无数据' }}</div>`,
+};
+
+const SettingSectionNav = {
+  props: ["items"],
+  template: `<nav class="settings-section-nav" aria-label="设置分区导航">
+    <a
+      v-for="item in items"
+      :key="item.id"
+      :href="'#' + item.id"
+      class="settings-section-link"
+    >{{ item.label }}</a>
+  </nav>`,
+};
+
+const SettingGroup = {
+  props: ["title", "description", "badge", "bodyClass"],
+  components: { FieldBadge },
+  template: `<section class="settings-group">
+    <div class="settings-group-header">
+      <div class="settings-group-copy">
+        <div class="settings-group-title-row">
+          <h3 class="settings-group-title">{{ title }}</h3>
+          <field-badge v-if="badge" :text="badge" tone="muted"></field-badge>
+        </div>
+        <p v-if="description" class="settings-group-description">{{ description }}</p>
+      </div>
+    </div>
+    <div :class="bodyClass || 'settings-group-body'"><slot></slot></div>
+  </section>`,
+};
+
+const ToggleField = {
+  props: ["label", "description", "checked", "disabled", "badge"],
+  emits: ["update:checked"],
+  components: { FieldBadge },
+  methods: {
+    onChange(event) {
+      this.$emit("update:checked", event.target.checked);
+    },
+  },
+  template: `<label
+    class="toggle-field"
+    :class="{ 'toggle-field-disabled': disabled }"
+  >
+    <span class="toggle-field-copy">
+      <span class="toggle-field-title-row">
+        <span class="toggle-field-title">{{ label }}</span>
+        <field-badge v-if="badge" :text="badge" tone="muted"></field-badge>
+      </span>
+      <span v-if="description" class="toggle-field-description">{{ description }}</span>
+    </span>
+    <input
+      type="checkbox"
+      class="toggle-field-checkbox"
+      :checked="checked"
+      :disabled="disabled"
+      @change="onChange"
+    >
+  </label>`,
 };
 
 const MappingOptionBadges = {
@@ -124,6 +197,7 @@ const LogPanel = {
       if (text === "ERROR" || text.includes("ERROR") || text.includes("DROP")) return "text-red-300 bg-red-950/60 border-red-900/70";
       if (text === "WARNING" || text.includes("WARN") || text.includes("FALLBACK")) return "text-amber-300 bg-amber-950/50 border-amber-900/70";
       if (text === "SUCCESS" || text.includes("SEND") || text.includes("MAP")) return "text-emerald-300 bg-emerald-950/50 border-emerald-900/70";
+      if (text === "HASH_PERTURB_SKIP") return "text-sky-200 bg-slate-800/70 border-slate-700";
       if (text.includes("SKIP")) return "text-yellow-200 bg-yellow-950/40 border-yellow-900/60";
       if (text.includes("REWRITE")) return "text-cyan-300 bg-cyan-950/40 border-cyan-900/60";
       return "text-sky-200 bg-slate-800/70 border-slate-700";
@@ -134,13 +208,21 @@ const LogPanel = {
     body(log) {
       return this.kind === "message" ? log.detail : log.msg;
     },
+    scrollToBottom() {
+      const panel = document.getElementById(this.panelId);
+      if (!panel) return;
+      panel.scrollTop = panel.scrollHeight;
+    },
   },
   template: `<app-card>
     <div class="mb-3">
       <h2 class="text-lg font-semibold">{{ title }}</h2>
       <p class="text-xs text-gray-500">{{ description }}</p>
       <div class="mt-3 flex items-center justify-between gap-3">
-        <button @click="$emit('export')" class="btn-secondary btn-inline !px-3 !py-1 text-xs">导出</button>
+        <div class="flex items-center gap-2">
+          <button @click="$emit('export')" class="btn-secondary btn-inline !px-3 !py-1 text-xs">导出</button>
+          <button @click="scrollToBottom" class="btn-secondary btn-inline !px-3 !py-1 text-xs">跳至底部</button>
+        </div>
         <button @click="$emit('clear')" class="btn-secondary btn-inline !px-3 !py-1 text-xs">清理</button>
       </div>
     </div>
@@ -164,9 +246,13 @@ window.TgcsUi = {
   SectionHeader,
   FormSection,
   FieldGroup,
+  FieldBadge,
   ActionBar,
   ToastBanner,
   EmptyState,
+  SettingSectionNav,
+  SettingGroup,
+  ToggleField,
   MappingOptionBadges,
   SenderIdentityOptions,
   LogPanel,

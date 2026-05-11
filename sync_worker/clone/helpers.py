@@ -26,6 +26,11 @@ def _is_request_entity_too_large(exc: Exception) -> bool:
     return "request entity too large" in str(exc).lower()
 
 
+def _is_topics_parse_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "topics" in text and "messages.__init__" in text
+
+
 def _is_chat_forwards_restricted(exc: Exception) -> bool:
     text = str(exc).lower()
     return "chat_forwards_restricted" in text or "restricts forwarding content" in text
@@ -78,15 +83,39 @@ async def _download_media_thumbnail(app, msg, msg_type: str) -> str | None:
 
 
 async def _execute_with_clone_retry(coro_factory, *, action_label: str):
+    return await _execute_with_clone_retry_interruptibly(coro_factory, action_label=action_label, stop_client=None)
+
+
+async def _execute_with_clone_retry_interruptibly(coro_factory, *, action_label: str, stop_client=None):
     while True:
-        try:
-            return await execute_with_network_retry(
+        task = asyncio.create_task(
+            execute_with_network_retry(
                 coro_factory,
                 action_label=action_label,
                 sync_state=sync_state,
                 log_tag="CLONE_NETWORK_RETRY",
             )
+        )
+        try:
+            while not task.done():
+                if sync_state.get("stop_requested"):
+                    if stop_client is not None and hasattr(stop_client, "stop_transmission"):
+                        try:
+                            stop_client.stop_transmission()
+                        except Exception:
+                            pass
+                    task.cancel()
+                    raise Exception("STOP_REQUESTED")
+                await asyncio.sleep(0.2)
+            return await task
         except Exception as exc:
+            if task.done():
+                try:
+                    await task
+                except Exception as task_exc:
+                    exc = task_exc
+            else:
+                await asyncio.gather(task, return_exceptions=True)
             if sync_state.get("stop_requested"):
                 raise
             retry_after = _parse_retry_after_seconds(exc)

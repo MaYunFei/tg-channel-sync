@@ -107,18 +107,34 @@ async def _execute_with_retry(
     action_label: str,
     max_attempts: int = 3,
     retry_unknown_errors: bool = True,
+    stop_client=None,
 ):
     attempt = 0
     while True:
         attempt += 1
         try:
-            return await execute_with_network_retry(
-                coro_factory,
-                action_label=action_label,
-                sync_state=sync_state,
-                log_tag="JSON_NETWORK_RETRY",
+            task = asyncio.create_task(
+                execute_with_network_retry(
+                    coro_factory,
+                    action_label=action_label,
+                    sync_state=sync_state,
+                    log_tag="JSON_NETWORK_RETRY",
+                )
             )
+            while not task.done():
+                if sync_state["stop_requested"]:
+                    if stop_client is not None and hasattr(stop_client, "stop_transmission"):
+                        try:
+                            stop_client.stop_transmission()
+                        except Exception:
+                            pass
+                    task.cancel()
+                    raise Exception("STOP_REQUESTED")
+                await asyncio.sleep(0.2)
+            return await task
         except Exception as exc:
+            if "task" in locals() and not task.done():
+                await asyncio.gather(task, return_exceptions=True)
             if sync_state["stop_requested"]:
                 raise
             retry_after = _parse_retry_after_seconds(exc)

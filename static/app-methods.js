@@ -2,6 +2,12 @@
   const api = window.TgcsApi;
 
   const uiMethods = {
+    syncModeFromStatus(status) {
+      const rawMode = String(status?.mode || "").trim().toLowerCase();
+      if (rawMode === "api" || rawMode === "json" || rawMode === "clone") {
+        this.syncForm.mode = rawMode;
+      }
+    },
     async bootstrap() {
       await Promise.all([
         this.loadConfig(),
@@ -17,6 +23,7 @@
       this.syncForm.delay = this.configForm.sync.default_delay || 5;
       this.syncForm.force_send = this.configForm.sync.force_send ? "1" : "0";
       this.syncForm.json_media_group_window_seconds = Number(this.syncForm.json_media_group_window_seconds || 3);
+      if (this.syncStatus?.is_syncing) this.syncModeFromStatus(this.syncStatus);
       this.currentView = this.setupStatus.needs_setup ? "setup" : "home";
     },
     navButtonClass(view) {
@@ -38,7 +45,7 @@
     },
     showAppError(message) {
       this.showToast(message, "error");
-      this.pushSystemNotice(message, "WARNING");
+      this.pushSystemNotice(message, "ERROR");
     },
     handleApiError(error, fallbackMessage) {
       const message = api.getErrorMessage(error, fallbackMessage);
@@ -161,6 +168,7 @@
         if (data.status) {
           if (this.stopping && !data.status.is_syncing) this.stopping = false;
           this.syncStatus = data.status;
+          if (data.status.is_syncing) this.syncModeFromStatus(data.status);
         }
         if (data.app_info) this.appInfo = data.app_info;
         if (data.sys_logs) this.sysLogs = [...this.sysLogs, ...data.sys_logs].slice(-100);

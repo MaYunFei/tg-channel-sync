@@ -110,3 +110,30 @@ class RawDownloaderTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ChunkedDownloadFallback):
                 await download_media_in_chunks(app, object(), "document", str(output), worker_count=2)
             self.assertFalse(output.exists())
+
+    async def test_download_chunk_turns_limit_invalid_into_fallback(self):
+        session = SimpleNamespace(
+            invoke=AsyncMock(side_effect=RuntimeError('Telegram says: [400 LIMIT_INVALID] (caused by "upload.GetFile")'))
+        )
+
+        from sync_worker.clone.raw_downloader import _download_chunk
+
+        with self.assertRaises(ChunkedDownloadFallback):
+            await _download_chunk(session, object(), 0, CHUNK_SIZE)
+
+    async def test_create_media_session_turns_auth_bytes_invalid_into_fallback(self):
+        app = SimpleNamespace(
+            storage=FakeStorage(),
+            invoke=AsyncMock(return_value=SimpleNamespace(id=1, bytes=b"bad")),
+        )
+        fake_session = FakeSession()
+        fake_session.start = AsyncMock()
+        fake_session.invoke = AsyncMock(side_effect=RuntimeError('Telegram says: [400 AUTH_BYTES_INVALID] (caused by "auth.ImportAuthorization")'))
+        fake_auth = SimpleNamespace(create=AsyncMock(return_value="auth-key"))
+
+        from sync_worker.clone.raw_downloader import _create_media_session
+
+        with patch("sync_worker.clone.raw_downloader.Auth", return_value=fake_auth), \
+             patch("sync_worker.clone.raw_downloader.Session", return_value=fake_session):
+            with self.assertRaises(ChunkedDownloadFallback):
+                await _create_media_session(app, 2)

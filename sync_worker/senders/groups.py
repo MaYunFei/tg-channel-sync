@@ -10,6 +10,7 @@ from aiogram.types import InputMediaVideo as AioVideo
 from pyrogram.enums import ParseMode
 from pyrogram.types import InputMediaAudio, InputMediaDocument, InputMediaPhoto, InputMediaVideo
 
+from ..core.media import extract_upload_metadata
 from ..core.progress import ProgressFSInputFile, UploadProgressTracker, format_upload_label
 from ..core.text import normalize_bot_html, normalize_pyro_html
 
@@ -48,6 +49,7 @@ def build_bot_media_group(downloaded_files, rewritten_captions, thumbnail_paths,
         thumbnail_input = FSInputFile(thumbnail_path) if thumbnail_path and os.path.exists(thumbnail_path) else None
         
         media_kwargs = {"media": media_input, "caption": normalize_bot_html(caption_html), "parse_mode": "HTML"}
+        media_kwargs.update(extract_upload_metadata(item, item_type))
         
         if index - 1 < len(spoiler_flags) and spoiler_flags[index - 1]:
             if item_type in {"photo", "video"}:
@@ -55,9 +57,6 @@ def build_bot_media_group(downloaded_files, rewritten_captions, thumbnail_paths,
         
         if item_type in {"video", "document"} and thumbnail_input is not None:
             media_kwargs["thumbnail"] = thumbnail_input
-        if item_type == "video":
-            media_kwargs["supports_streaming"] = True
-        
         media_list.append(media_cls(**media_kwargs))
     
     return tracker, media_list
@@ -85,6 +84,7 @@ def build_user_media_group(downloaded_files, rewritten_captions, thumbnail_paths
             "caption": normalize_pyro_html(rewritten_captions[index]),
             "parse_mode": ParseMode.HTML,
         }
+        media_kwargs.update(extract_upload_metadata(item, item_type))
         
         if index < len(spoiler_flags) and spoiler_flags[index]:
             if item_type in {"photo", "video"}:

@@ -78,8 +78,15 @@ def build_pyro_progress_callback(
     file_label: str,
     *,
     total_bytes: int | None = None,
+    client=None,
 ):
     def _callback(current: int, total: int, *args):
+        if sync_state.get("stop_requested") and client is not None and hasattr(client, "stop_transmission"):
+            try:
+                client.stop_transmission()
+            except Exception:
+                pass
+            return
         tracker.set_absolute(current, file_label, total_bytes or total)
 
     return _callback
