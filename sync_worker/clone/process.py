@@ -462,14 +462,14 @@ async def sync_single_message(
                         await asyncio.sleep(2)
 
                 if sent_id is None and _clone_should_fallback_to_user(sender, clone_fallback_to_user) and actual_sender == "bot":
-                    fallback_reason = "Bot 上传体积超限，回退辅助账号重传" if bot_size_limit_hit else f"{upload_target['label']} 上传失败，回退辅助账号重传"
+                    fallback_reason = "Bot 上传体积超限，改用辅助账号重传" if bot_size_limit_hit else f"{upload_target['label']} 上传失败，改用辅助账号重传"
                     await db.add_msg_log("BOT_FALLBACK", f"原始:[{source_id}] 消息ID:{msg.id} | {fallback_reason}")
                     for _ in range(3):
                         if sync_state["stop_requested"]:
                             break
                         try:
                             file_label = format_upload_label(msg_type, file_path)
-                            tracker = UploadProgressTracker("上传中 [辅助账号回退]", file_size)
+                            tracker = UploadProgressTracker("上传中 [改用辅助账号]", file_size)
                             sent = await _execute_with_clone_retry_interruptibly(
                                 lambda: dynamic_send(
                                     app,
@@ -836,9 +836,9 @@ async def sync_media_group(
 
         if not sync_state["stop_requested"] and should_fallback_to_user(sender, clone_fallback_to_user) and actual_sender == "bot" and not sent_group_success:
             first_id = group[0].id if group else 0
-            fallback_reason = "Bot 上传体积超限，回退辅助账号重传" if bot_size_limit_hit else f"{upload_target['label']} 上传失败，回退辅助账号重传"
+            fallback_reason = "Bot 上传体积超限，改用辅助账号重传" if bot_size_limit_hit else f"{upload_target['label']} 上传失败，改用辅助账号重传"
             await db.add_msg_log("BOT_FALLBACK", f"原始:[{source_id}] 组首ID:{first_id} | {fallback_reason}")
-            tracker = UploadProgressTracker("上传媒体组 [辅助账号回退]", sum(file_sizes))
+            tracker = UploadProgressTracker("上传媒体组 [改用辅助账号]", sum(file_sizes))
             group_items = [(item, path, get_msg_meta(item, mode)[0]) for item, path in downloaded_files]
             media_list = build_user_media_group(group_items, rewritten_captions, thumbnail_paths, spoiler_flags)
             send_kwargs = {"chat_id": target_id, "media": media_list}
@@ -864,7 +864,7 @@ async def sync_media_group(
                     await record_success(source_id, target_id, orig_m.id, new_m.id, force_send=force_send)
                 await db.add_msg_log(
                     "CLONE_GROUP_SEND",
-                    f"原始:[{source_id}] 组首ID:{first_id} | 目标:[{target_id}] 共 {len(group)} 项 | 辅助账号回退发送成功",
+                    f"原始:[{source_id}] 组首ID:{first_id} | 目标:[{target_id}] 共 {len(group)} 项 | 已改用辅助账号发送成功",
                 )
             except Exception as exc:
                 if _is_topics_parse_error(exc):
@@ -872,7 +872,7 @@ async def sync_media_group(
                         await record_success(source_id, target_id, orig_m.id, 0, force_send=force_send)
                     await db.add_msg_log(
                         "CLONE_TOPICS_COMPAT",
-                        f"原始:[{source_id}] 组首ID:{first_id} | 辅助账号回退发送后返回 topics 解析异常，已停止重试避免重复发送",
+                        f"原始:[{source_id}] 组首ID:{first_id} | 改用辅助账号发送后返回 topics 解析异常，已停止重试避免重复发送",
                     )
                     await db.add_msg_log(
                         "CLONE_GROUP_SEND",

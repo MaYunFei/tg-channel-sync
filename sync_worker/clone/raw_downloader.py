@@ -114,7 +114,7 @@ async def _create_media_session(app, dc_id: int) -> Session:
             )
         except Exception as exc:
             if _is_auth_bytes_invalid_error(exc):
-                raise ChunkedDownloadFallback("跨 DC 分块授权失败，已回退普通下载") from exc
+                raise ChunkedDownloadFallback("跨 DC 分块授权失败，已改用普通下载") from exc
             raise
     return session
 
@@ -149,10 +149,10 @@ async def _download_chunk(session: Session, location, offset: int, limit: int):
         )
     except Exception as exc:
         if _is_limit_invalid_error(exc):
-            raise ChunkedDownloadFallback("当前文件不支持分块下载，已回退普通下载") from exc
+            raise ChunkedDownloadFallback("当前文件不支持分块下载，已改用普通下载") from exc
         raise
     if isinstance(response, raw.types.upload.FileCdnRedirect):
-        raise ChunkedDownloadFallback("媒体下载命中 Telegram CDN，已回退普通下载")
+        raise ChunkedDownloadFallback("媒体下载命中 Telegram CDN，已改用普通下载")
     if not isinstance(response, raw.types.upload.File):
         raise RuntimeError(f"未知下载响应类型: {type(response).__name__}")
     return bytes(response.bytes)

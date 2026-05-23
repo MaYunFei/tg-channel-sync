@@ -26,6 +26,27 @@ class JsonSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(json_sync._is_topics_parse_error(TypeError("Messages.__init__() missing 1 required keyword-only argument: 'topics'")))
         self.assertFalse(json_sync._is_topics_parse_error(Exception("retry after 10")))
 
+    def test_scan_json_import_media_groups_reports_large_groups_without_splitting(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for name, size in [("a.bin", 3), ("b.bin", 4)]:
+                (Path(temp_dir) / name).write_bytes(b"x" * size)
+            groups = [[
+                {"id": 1, "type": "message", "file": "a.bin"},
+                {"id": 2, "type": "message", "file": "b.bin"},
+            ]]
+
+            with patch("sync_worker.json_import.process.JSON_STANDARD_USER_UPLOAD_MAX_BYTES", 6), \
+                 patch("sync_worker.json_import.process.bot_engine.should_upload_via_bot", return_value=False):
+                stats = json_sync._scan_json_import_media_groups(groups, temp_dir, "bot")
+
+            self.assertEqual(stats["media_files"], 2)
+            self.assertEqual(stats["media_groups"], 1)
+            self.assertEqual(stats["file_media_groups"], 1)
+            self.assertEqual(stats["large_group_count"], 1)
+            self.assertEqual(stats["largest_group_first_id"], 1)
+            self.assertEqual(stats["largest_group_bytes"], 7)
+            self.assertEqual(stats["over_bot_limit"], 2)
+
     async def test_send_json_single_via_user_raises_fatal_when_user_not_logged_in(self):
         with patch("sync_worker.json_import.process.bot_engine.pyro_user_app") as mock_app:
             mock_app.is_initialized = False

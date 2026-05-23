@@ -127,7 +127,7 @@ def _build_upload_bot_pool(primary_bot, primary_token: str, *, use_local_api: bo
         )
 
     if primary_bot is not None:
-        add_bot(primary_bot, primary_token, "主Bot")
+        add_bot(primary_bot, primary_token, "主 Bot")
 
     for index, token in enumerate(telegram.get("extra_bot_tokens", []), start=2):
         try:
@@ -258,12 +258,12 @@ def describe_user_client(client, fallback: str = "辅助账号") -> str:
     return fallback
 
 
-def describe_upload_bot(client, fallback: str = "机器人") -> str:
+def describe_upload_bot(client, fallback: str = "Bot") -> str:
     for bot_state in upload_bots:
         if bot_state["client"] == client:
             return bot_state["label"]
     if aiogram_bot is not None and client == aiogram_bot:
-        return "主Bot"
+        return "主 Bot"
     return fallback
 
 
@@ -271,8 +271,8 @@ async def acquire_upload_bot(file_size: int, wait_if_unavailable: bool = True):
     global upload_bot_rr_index
     if not upload_bots:
         if aiogram_bot is None:
-            raise RuntimeError("BOT 未配置或未连接，无法执行 bot 上传")
-        return {"client": aiogram_bot, "label": "主Bot"}
+            raise RuntimeError("Bot 未配置或未连接，无法执行 Bot 上传")
+        return {"client": aiogram_bot, "label": "主 Bot"}
 
     sync_cfg = get_config()["sync"]
     rate_limit_enabled = bool(sync_cfg.get("bot_rate_limit_enabled", False))
@@ -307,12 +307,12 @@ async def acquire_upload_bot(file_size: int, wait_if_unavailable: bool = True):
             return {"client": bot_state["client"], "label": bot_state["label"]}
 
         if disabled_count == total:
-            raise RuntimeError("全部上传 Bot 均已失效，请检查 BOT_TOKEN / extra BOT_TOKEN 配置")
+            raise RuntimeError("全部上传 Bot 均已失效，请检查 BOT_TOKEN / 额外 BOT_TOKEN 配置")
         if not wait_if_unavailable:
             return None
         wait_seconds = max(1, int((earliest_ready_at or (now + 5)) - now))
         detail = f"：{'、'.join(blocked_labels)}" if blocked_labels else ""
-        await db.add_msg_log("BOT_WAIT", f"机器人上传池暂时不可用{detail}，等待 {wait_seconds} 秒后继续；如需立即继续，可切换为辅助账号发送")
+        await db.add_msg_log("BOT_WAIT", f"Bot 上传池暂时不可用{detail}，等待 {wait_seconds} 秒后继续；如需立即继续，可切换为辅助账号发送")
         await asyncio.sleep(wait_seconds)
 
 
@@ -334,7 +334,7 @@ async def note_upload_success(bot_client, file_size: int):
                 lock_until = max(now + cooldown_seconds, _window_reset_at(bot_state, window_seconds))
                 bot_state["cooldown_until"] = max(float(bot_state.get("cooldown_until", 0.0) or 0.0), lock_until)
                 wait_minutes = max(1, ceil(max(0.0, lock_until - now) / 60))
-                await db.add_msg_log("BOT_ROTATE", f"{bot_state['label']} 达到上传阈值，暂停 {wait_minutes} 分钟并轮换下一个 bot")
+                await db.add_msg_log("BOT_ROTATE", f"{bot_state['label']} 达到上传阈值，暂停 {wait_minutes} 分钟并轮换下一个 Bot")
             break
 
 
@@ -348,7 +348,7 @@ async def mark_upload_bot_cooldown(bot_client, cooldown_seconds: int, reason: st
             continue
         bot_state["cooldown_until"] = max(float(bot_state.get("cooldown_until", 0.0) or 0.0), now + wait_seconds)
         detail = f" | {reason}" if reason else ""
-        await db.add_msg_log("BOT_ROTATE", f"{bot_state['label']} 遇到频控，冷却 {wait_seconds} 秒并轮换下一个 bot{detail}")
+        await db.add_msg_log("BOT_ROTATE", f"{bot_state['label']} 遇到频控，冷却 {wait_seconds} 秒并轮换下一个 Bot{detail}")
         return bot_state["label"]
     return None
 
@@ -500,7 +500,7 @@ async def _send_realtime_media_group_via_user(target_id, downloaded_files, capti
     if not getattr(pyro_user_app, "is_initialized", False):
         raise RuntimeError("实时同步使用辅助账号发送前，请先完成辅助账号登录")
     total_size = sum(os.path.getsize(path) for _, path, _ in downloaded_files)
-    tracker = UploadProgressTracker("实时上传媒体组 [辅助账号回退]", total_size)
+    tracker = UploadProgressTracker("实时上传媒体组 [改用辅助账号]", total_size)
     media = build_user_media_group(downloaded_files, captions, {})
     kwargs = {"chat_id": target_id, "media": media}
     if reply_to_id:
@@ -582,7 +582,7 @@ async def _send_realtime_media_upload(source_id, target_id, message, msg_type, t
                         await db.add_msg_log("BOT_FALLBACK", f"实时同步 消息ID:{message.message_id} | 当前 Bot 已失效，已切换辅助账号重传")
                     continue
                 if _realtime_should_fallback_to_user(options) and getattr(pyro_user_app, "is_initialized", False):
-                    await db.add_msg_log("BOT_FALLBACK", f"实时同步 消息ID:{message.message_id} | Bot 上传失败，已回退辅助账号重传")
+                    await db.add_msg_log("BOT_FALLBACK", f"实时同步 消息ID:{message.message_id} | Bot 上传失败，已改用辅助账号重传")
                     return await _send_realtime_media_via_user(
                         target_id,
                         msg_type,
@@ -653,7 +653,7 @@ async def _send_realtime_media_group_upload(source_id, target_id, group, caption
                         await db.add_msg_log("BOT_FALLBACK", f"实时同步 组首ID:{group[0].message_id} | 当前 Bot 已失效，已切换辅助账号重传")
                     continue
                 if _realtime_should_fallback_to_user(options) and getattr(pyro_user_app, "is_initialized", False):
-                    await db.add_msg_log("BOT_FALLBACK", f"实时同步 组首ID:{group[0].message_id} | Bot 上传失败，已回退辅助账号重传")
+                    await db.add_msg_log("BOT_FALLBACK", f"实时同步 组首ID:{group[0].message_id} | Bot 上传失败，已改用辅助账号重传")
                     return await _send_realtime_media_group_via_user(
                         target_id,
                         downloaded_files,
@@ -793,7 +793,7 @@ async def handle_new_post(message: Message):
                                 await db.add_msg_log("QUOTE_GROUP_SEND", f"源频道:{source_id} | 目标频道:{target_id} | 组首消息ID:{group[0].message_id} | 已保留引用回复")
                             await db.add_msg_log("SEND_GROUP", f"源频道:{source_id} | 目标频道:{target_id} | 媒体组消息ID:{msg_ids} | 转发成功")
                     except Exception:
-                        await db.add_msg_log("WARN", f"目标频道:{target_id} | 媒体组整组复制失败，已回退为逐条复制")
+                        await db.add_msg_log("WARN", f"目标频道:{target_id} | 媒体组整组复制失败，已改为逐条复制")
                         for item in group:
                             try:
                                 item_text = item.html_text if item.text or item.caption else ""

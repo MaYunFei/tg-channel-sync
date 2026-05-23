@@ -53,6 +53,7 @@ from .helpers import (
 
 
 JSON_TEXT_MESSAGE_LIMIT = 4096
+JSON_STANDARD_USER_UPLOAD_MAX_BYTES = 2000 * 1024 * 1024
 HTML_TOKEN_RE = re.compile(r"<[^>]+>|[^<]+")
 HTML_TAG_NAME_RE = re.compile(r"</?\s*([A-Za-z][A-Za-z0-9-]*)")
 
@@ -63,6 +64,95 @@ def _pyro_file_ref(media_path: str) -> str:
 
 def _get_sent_message_id(sent_msg):
     return getattr(sent_msg, "message_id", None) or getattr(sent_msg, "id", None)
+
+
+def _format_bytes(size: int) -> str:
+    size = max(0, int(size or 0))
+    if size >= 1024 * 1024 * 1024:
+        return f"{size / (1024 * 1024 * 1024):.2f} GB"
+    return f"{size / (1024 * 1024):.1f} MB"
+
+
+def _scan_json_import_media_groups(groups: list[list[dict]], json_dir: str, sender: str) -> dict:
+    stats = {
+        "media_files": 0,
+        "missing_files": 0,
+        "media_groups": 0,
+        "file_media_groups": 0,
+        "large_group_count": 0,
+        "largest_group_first_id": 0,
+        "largest_group_bytes": 0,
+        "largest_group_items": 0,
+        "largest_file_msg_id": 0,
+        "largest_file_bytes": 0,
+        "over_standard_user_limit": 0,
+        "over_bot_limit": 0,
+    }
+
+    for group in groups:
+        group_file_sizes = []
+        group_family = _json_group_family(group[0]) if group else None
+        for item in group:
+            media_path, _, _ = resolve_json_media(item, json_dir)
+            if not media_path:
+                continue
+            if not os.path.exists(media_path):
+                stats["missing_files"] += 1
+                continue
+            file_size = os.path.getsize(media_path)
+            stats["media_files"] += 1
+            group_file_sizes.append(file_size)
+            if file_size > stats["largest_file_bytes"]:
+                stats["largest_file_bytes"] = file_size
+                stats["largest_file_msg_id"] = int(item.get("id") or 0)
+            if file_size > JSON_STANDARD_USER_UPLOAD_MAX_BYTES:
+                stats["over_standard_user_limit"] += 1
+            if sender == "bot" and not bot_engine.should_upload_via_bot(file_size):
+                stats["over_bot_limit"] += 1
+
+        if len(group) > 1:
+            stats["media_groups"] += 1
+            if group_family == "document":
+                stats["file_media_groups"] += 1
+            group_bytes = sum(group_file_sizes)
+            if group_bytes > stats["largest_group_bytes"]:
+                stats["largest_group_bytes"] = group_bytes
+                stats["largest_group_first_id"] = int(group[0].get("id") or 0)
+                stats["largest_group_items"] = len(group)
+            if group_bytes > JSON_STANDARD_USER_UPLOAD_MAX_BYTES:
+                stats["large_group_count"] += 1
+
+    return stats
+
+
+async def _log_json_import_scan(stats: dict) -> None:
+    if not stats["media_files"] and not stats["missing_files"] and not stats["media_groups"]:
+        return
+
+    await db.add_msg_log(
+        "JSON_SCAN",
+        (
+            f"预扫描完成 | 媒体文件:{stats['media_files']} | 媒体组:{stats['media_groups']} "
+            f"（文件媒体组:{stats['file_media_groups']}）| 最大媒体组:首ID {stats['largest_group_first_id']}，"
+            f"{stats['largest_group_items']} 条，共 {_format_bytes(stats['largest_group_bytes'])} | "
+            f"最大单文件:消息ID {stats['largest_file_msg_id']}，{_format_bytes(stats['largest_file_bytes'])}"
+        ),
+    )
+    if stats["missing_files"]:
+        await db.add_msg_log("JSON_WARN", f"预扫描发现 {stats['missing_files']} 个媒体文件不存在，发送到对应消息时会跳过或改为逐条处理")
+    if stats["over_bot_limit"]:
+        await db.add_msg_log("JSON_WARN", f"预扫描发现 {stats['over_bot_limit']} 个文件超过当前 Bot 单文件上限，发送时会按现有规则改用辅助账号或报错")
+    if stats["over_standard_user_limit"]:
+        await db.add_msg_log("JSON_WARN", f"预扫描发现 {stats['over_standard_user_limit']} 个文件超过 2GB 普通账号上传上限，可能需要 Premium 辅助账号或本地 Bot API 支持")
+    if stats["large_group_count"]:
+        await db.add_msg_log(
+            "JSON_INFO",
+            (
+                f"预扫描发现 {stats['large_group_count']} 个媒体组总大小超过 2GB。"
+                "Telegram 主要限制单文件大小和每组数量，本次不会按组总大小强制拆分；"
+                "如本机资源紧张，建议分批导入。"
+            ),
+        )
 
 
 def _html_tag_name(token: str) -> str:
@@ -226,7 +316,7 @@ async def _send_json_text_via_bot(upload_target, sender, clone_fallback_to_user,
                 raise
 
         if sent is None and not sync_state["stop_requested"] and _json_should_fallback_to_user(sender, clone_fallback_to_user):
-            await db.add_msg_log("JSON_FALLBACK", f"消息ID:{msg_id} | Bot 发送失败，已回退辅助账号发送文本")
+            await db.add_msg_log("JSON_FALLBACK", f"消息ID:{msg_id} | Bot 发送失败，已改用辅助账号发送文本")
             user_sent = await _send_json_text_parts_via_user(target_id, text_parts[index:], part_reply_to_id)
             return first_sent or user_sent
         if sent is None:
@@ -269,7 +359,7 @@ async def _send_json_group_via_user(group, target_id, rewritten_captions, file_e
     if not getattr(app, "is_initialized", False):
         raise JsonSyncFatalError("Bot 上传体积超限，且辅助账号未登录，无法回退发送媒体组")
     total_bytes = sum(os.path.getsize(path) for _, path, _ in file_entries)
-    tracker = SharedUploadProgressTracker("上传媒体组 [辅助账号回退]", total_bytes)
+    tracker = SharedUploadProgressTracker("上传媒体组 [改用辅助账号]", total_bytes)
     normalized_captions = []
     group_items = []
     spoiler_flags = []
@@ -345,7 +435,7 @@ async def send_json_media_group(
         item_id = int(item.get("id") or 0)
         media_path, media_type, _ = resolve_json_media(item, json_dir)
         if not media_path or not os.path.exists(media_path):
-            await db.add_msg_log("JSON_MEDIA_MISSING", f"消息ID:{item_id} | 媒体组文件不存在，已回退为逐条发送")
+            await db.add_msg_log("JSON_MEDIA_MISSING", f"消息ID:{item_id} | 媒体组文件不存在，已改为逐条发送")
             return None
         media_path, created_temp = await _prepare_json_media_path(media_path, media_type, item_id, hash_perturb)
         if created_temp:
@@ -413,7 +503,7 @@ async def send_json_media_group(
                     raise
                 if _is_request_entity_too_large(exc):
                     if _json_should_fallback_to_user(sender, clone_fallback_to_user):
-                        await db.add_msg_log("JSON_FALLBACK", f"组首消息ID:{first_id} | Bot 上传体积超限，已回退辅助账号发送媒体组")
+                        await db.add_msg_log("JSON_FALLBACK", f"组首消息ID:{first_id} | Bot 上传体积超限，已改用辅助账号发送媒体组")
                         sent_group = await _send_json_group_via_user(group, target_id, rewritten_captions, file_entries, reply_to_id)
                         break
                     raise
@@ -446,7 +536,7 @@ async def send_json_media_group(
                     continue
                 raise
         if sent_group is None and not sync_state["stop_requested"] and _json_should_fallback_to_user(sender, clone_fallback_to_user):
-            await db.add_msg_log("JSON_FALLBACK", f"组首消息ID:{first_id} | Bot 发送失败，已回退辅助账号发送媒体组")
+            await db.add_msg_log("JSON_FALLBACK", f"组首消息ID:{first_id} | Bot 发送失败，已改用辅助账号发送媒体组")
             sent_group = await _send_json_group_via_user(group, target_id, rewritten_captions, file_entries, reply_to_id)
 
     try:
@@ -526,8 +616,10 @@ async def process_json_sync(
         include_external_source_header = legacy_value in {"1", "true", "yes", "on"}
 
     media_group_window_seconds = max(1, int(media_group_window_seconds or JSON_MEDIA_GROUP_WINDOW_SECONDS))
+    grouped_messages = group_json_messages(messages, media_group_window_seconds)
+    await _log_json_import_scan(_scan_json_import_media_groups(grouped_messages, json_dir, sender))
 
-    for group in group_json_messages(messages, media_group_window_seconds):
+    for group in grouped_messages:
         if sync_state["stop_requested"]:
             break
         if len(group) > 1:
@@ -625,7 +717,7 @@ async def process_json_sync(
                                 media_path,
                                 caption,
                                 reply_to_id,
-                                SharedUploadProgressTracker("上传中 [辅助账号回退]", file_size),
+                                SharedUploadProgressTracker("上传中 [改用辅助账号]", file_size),
                                 file_label,
                                 media_has_spoiler,
                             )
@@ -689,14 +781,14 @@ async def process_json_sync(
                                         thumb_path = os.path.join(json_dir, thumb) if thumb else ""
                                         if _is_request_entity_too_large(exc):
                                             if _json_should_fallback_to_user(sender, clone_fallback_to_user):
-                                                await db.add_msg_log("JSON_FALLBACK", f"消息ID:{msg_id} | Bot 上传体积超限，已回退辅助账号发送")
+                                                await db.add_msg_log("JSON_FALLBACK", f"消息ID:{msg_id} | Bot 上传体积超限，已改用辅助账号发送")
                                                 sent = await _send_json_single_via_user(
                                                     target_id,
                                                     media_type,
                                                     media_path,
                                                     caption,
                                                     reply_to_id,
-                                                    SharedUploadProgressTracker("上传中 [辅助账号回退]", file_size),
+                                                    SharedUploadProgressTracker("上传中 [改用辅助账号]", file_size),
                                                     file_label,
                                                     media_has_spoiler,
                                                 )
@@ -719,7 +811,7 @@ async def process_json_sync(
                                                     media_path,
                                                     caption,
                                                     reply_to_id,
-                                                    SharedUploadProgressTracker("上传中 [辅助账号回退]", file_size),
+                                                    SharedUploadProgressTracker("上传中 [改用辅助账号]", file_size),
                                                     file_label,
                                                     media_has_spoiler,
                                                 )
@@ -741,7 +833,7 @@ async def process_json_sync(
                                                     media_path,
                                                     caption,
                                                     reply_to_id,
-                                                    SharedUploadProgressTracker("上传中 [辅助账号回退]", file_size),
+                                                    SharedUploadProgressTracker("上传中 [改用辅助账号]", file_size),
                                                     file_label,
                                                     media_has_spoiler,
                                                 )
@@ -749,7 +841,7 @@ async def process_json_sync(
                                             continue
                                         if not thumb_path or not os.path.exists(thumb_path):
                                             raise
-                                        await db.add_msg_log("JSON_STICKER_AS_IMAGE", f"消息ID:{msg_id} | 贴纸发送失败，已回退为缩略图图片发送: {exc}")
+                                        await db.add_msg_log("JSON_STICKER_AS_IMAGE", f"消息ID:{msg_id} | 贴纸发送失败，已改为缩略图图片发送: {exc}")
                                         sent = await _execute_with_retry(
                                             lambda: bot_engine.aiogram_bot.send_photo(
                                                 target_id,
@@ -763,14 +855,14 @@ async def process_json_sync(
                                         break
                                     if _is_request_entity_too_large(exc):
                                         if _json_should_fallback_to_user(sender, clone_fallback_to_user):
-                                            await db.add_msg_log("JSON_FALLBACK", f"消息ID:{msg_id} | Bot 上传体积超限，已回退辅助账号发送")
+                                            await db.add_msg_log("JSON_FALLBACK", f"消息ID:{msg_id} | Bot 上传体积超限，已改用辅助账号发送")
                                             sent = await _send_json_single_via_user(
                                                 target_id,
                                                 media_type,
                                                 media_path,
                                                 caption,
                                                 reply_to_id,
-                                                SharedUploadProgressTracker("上传中 [辅助账号回退]", file_size),
+                                                SharedUploadProgressTracker("上传中 [改用辅助账号]", file_size),
                                                 file_label,
                                                 media_has_spoiler,
                                             )
@@ -793,7 +885,7 @@ async def process_json_sync(
                                                 media_path,
                                                 caption,
                                                 reply_to_id,
-                                                SharedUploadProgressTracker("上传中 [辅助账号回退]", file_size),
+                                                SharedUploadProgressTracker("上传中 [改用辅助账号]", file_size),
                                                 file_label,
                                                 media_has_spoiler,
                                             )
@@ -815,7 +907,7 @@ async def process_json_sync(
                                                 media_path,
                                                 caption,
                                                 reply_to_id,
-                                                SharedUploadProgressTracker("上传中 [辅助账号回退]", file_size),
+                                                SharedUploadProgressTracker("上传中 [改用辅助账号]", file_size),
                                                 file_label,
                                                 media_has_spoiler,
                                             )
@@ -823,14 +915,14 @@ async def process_json_sync(
                                         continue
                                     raise
                             if sent is None and not sync_state["stop_requested"] and _json_should_fallback_to_user(sender, clone_fallback_to_user):
-                                await db.add_msg_log("JSON_FALLBACK", f"消息ID:{msg_id} | Bot 发送失败，已回退辅助账号发送")
+                                await db.add_msg_log("JSON_FALLBACK", f"消息ID:{msg_id} | Bot 发送失败，已改用辅助账号发送")
                                 sent = await _send_json_single_via_user(
                                     target_id,
                                     media_type,
                                     media_path,
                                     caption,
                                     reply_to_id,
-                                    SharedUploadProgressTracker("上传中 [辅助账号回退]", file_size),
+                                    SharedUploadProgressTracker("上传中 [改用辅助账号]", file_size),
                                     file_label,
                                     media_has_spoiler,
                                 )

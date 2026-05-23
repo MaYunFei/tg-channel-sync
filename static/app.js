@@ -18,7 +18,7 @@ const {
 const HELP_LINK = "https://github.com/RRHTY/tg-channel-sync/issues/2";
 
 const BotApiHint = {
-  template: `<p class="text-xs text-gray-500 mt-1">可选。自行搭建 BOT API 可突破机器人上传 50M 限制，参考 <a :href="helpLink" target="_blank" class="text-blue-600 hover:underline">#2</a></p>`,
+  template: `<p class="text-xs text-gray-500 mt-1">可选。自行搭建 BOT API 可突破 Bot 上传 50M 限制，参考 <a :href="helpLink" target="_blank" class="text-blue-600 hover:underline">#2</a></p>`,
   data(){ return { helpLink: HELP_LINK }; }
 };
 
@@ -295,7 +295,7 @@ const SettingsPanel = {
               <textarea v-model="config.telegram.extra_bot_tokens" rows="4" class="input-box font-mono text-sm"></textarea>
             </field-group>
             <toggle-field
-              label="启用多 bot 上传限流轮换"
+              label="启用多 Bot 上传限流轮换"
               description="适用于频繁上传时规避单个 Bot 的速率限制。"
               :checked="config.sync.bot_rate_limit_enabled"
               @update:checked="config.sync.bot_rate_limit_enabled = $event"

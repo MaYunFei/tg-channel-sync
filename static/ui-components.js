@@ -130,8 +130,8 @@ const MappingOptionBadges = {
   computed: {
     badges() {
       const item = this.item || {};
-      const values = [item.realtime_sender === "user" ? "辅助账号" : "机器人"];
-      if (item.realtime_sender === "bot" && item.realtime_fallback_to_user) values.push("Bot失败回退");
+      const values = [item.realtime_sender === "user" ? "辅助账号" : "Bot"];
+      if (item.realtime_sender === "bot" && item.realtime_fallback_to_user) values.push("Bot 失败后改用辅助账号");
       if (item.realtime_hash_perturb) values.push("重置指纹");
       return values;
     },
@@ -175,11 +175,11 @@ const SenderIdentityOptions = {
   template: `<div class="bg-white p-3 rounded border text-sm space-y-3">
     <div class="flex items-center gap-4">
       <b>发送身份</b>
-      <label><input type="radio" :checked="sender === 'bot'" value="bot" class="ml-2 mr-1" @change="onSenderChange">机器人</label>
+      <label><input type="radio" :checked="sender === 'bot'" value="bot" class="ml-2 mr-1" @change="onSenderChange">Bot</label>
       <label><input type="radio" :checked="sender === 'user'" value="user" class="ml-2 mr-1" @change="onSenderChange">辅助账号</label>
     </div>
     <label v-if="sender === 'bot'" class="flex items-center gap-2">
-      <input type="checkbox" :checked="fallbackChecked" @change="onFallbackChange">Bot 发送失败时回退辅助账号继续发送
+      <input type="checkbox" :checked="fallbackChecked" @change="onFallbackChange">Bot 发送失败时改用辅助账号继续发送
     </label>
     <label v-if="showHashOption" class="flex items-center gap-2">
       <input type="checkbox" :checked="hashChecked" @change="onHashChange">重置图片/视频指纹
