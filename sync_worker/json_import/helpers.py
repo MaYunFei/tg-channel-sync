@@ -101,6 +101,10 @@ def _json_should_fallback_to_user(sender: str, clone_fallback_to_user: bool) -> 
     return sender == "bot" and bool(clone_fallback_to_user)
 
 
+async def _sleep_retry_delay(seconds: int) -> None:
+    await asyncio.sleep(seconds)
+
+
 async def _execute_with_retry(
     coro_factory,
     *,
@@ -140,7 +144,7 @@ async def _execute_with_retry(
             retry_after = _parse_retry_after_seconds(exc)
             if retry_after is not None:
                 await db.add_msg_log("JSON_RETRY", f"{action_label} | 遇到频控，等待 {retry_after + 1} 秒后重试")
-                await asyncio.sleep(retry_after + 1)
+                await _sleep_retry_delay(retry_after + 1)
                 continue
             if not retry_unknown_errors:
                 raise

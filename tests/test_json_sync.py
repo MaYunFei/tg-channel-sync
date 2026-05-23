@@ -91,7 +91,7 @@ class JsonSyncTests(unittest.IsolatedAsyncioTestCase):
 
         with patch("sync_worker.json_import.helpers.execute_with_network_retry", AsyncMock(side_effect=passthrough)), \
              patch("sync_worker.json_import.helpers.db.add_msg_log", AsyncMock()) as mock_add_msg_log, \
-             patch("sync_worker.json_import.helpers.asyncio.sleep", AsyncMock()) as mock_sleep:
+             patch("sync_worker.json_import.helpers._sleep_retry_delay", AsyncMock()) as mock_sleep:
             result = await json_sync._execute_with_retry(
                 flaky_call,
                 action_label="文本消息 -> 辅助账号发送",
