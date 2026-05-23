@@ -24,6 +24,7 @@ config.json
 *.session
 *.session-journal
 *.db
+/.codestable
 
 # Build artifacts
 /build/

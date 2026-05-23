@@ -2,6 +2,7 @@ import unittest
 
 from sync_worker.core import (
     build_json_text,
+    get_msg_meta,
     has_media_spoiler,
     has_text_spoiler,
     normalize_bot_html,
@@ -81,6 +82,12 @@ class JsonCommonTests(unittest.TestCase):
         self.assertEqual(resolve_json_media(msg_video, "X")[1], "document")
         self.assertEqual(resolve_json_media(msg_animation, "X")[1], "animation")
         self.assertEqual(resolve_json_media(msg_sticker, "X")[1], "sticker")
+
+    def test_get_msg_meta_treats_json_video_file_as_document(self):
+        self.assertEqual(
+            get_msg_meta({"media_type": "video_file", "file": "video_files/a.mp4"}, "json"),
+            ("document", "sync_document"),
+        )
 
     def test_has_media_spoiler_reads_json_export_flag(self):
         self.assertTrue(has_media_spoiler({"media_spoiler": True}, "photo", "json"))

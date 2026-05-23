@@ -250,6 +250,33 @@ class JsonSyncTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([[item["id"] for item in group] for group in grouped], [[1], [2]])
 
+    def test_group_json_messages_keeps_same_external_reply_in_one_group(self):
+        messages = [
+            {
+                "id": index,
+                "type": "message",
+                "date_unixtime": "1777273064",
+                "photo": f"photos/{index}.jpg",
+                "text": f"图片说明 {index}",
+                "reply_to_message_id": 1,
+            }
+            for index in range(10, 13)
+        ]
+
+        grouped = json_sync.group_json_messages(messages, 3)
+
+        self.assertEqual([[item["id"] for item in group] for group in grouped], [[10, 11, 12]])
+
+    def test_split_json_text_for_send_keeps_html_balanced(self):
+        text = "<b>" + ("x" * 5000) + "</b>"
+
+        parts = json_sync._split_json_text_for_send(text)
+
+        self.assertGreater(len(parts), 1)
+        self.assertTrue(all(len(part) <= json_sync.JSON_TEXT_MESSAGE_LIMIT for part in parts))
+        self.assertTrue(all(part.startswith("<b>") for part in parts))
+        self.assertTrue(all(part.endswith("</b>") for part in parts))
+
     async def test_send_json_media_group_keeps_document_captions(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             for name in ["a.txt", "b.txt"]:
@@ -617,6 +644,46 @@ class JsonSyncTests(unittest.IsolatedAsyncioTestCase):
                 await json_sync.process_json_sync("user", "@target", str(json_path), 0.5, False)
 
             fake_user.send_message.assert_awaited_once()
+
+    async def test_process_json_sync_splits_long_text_via_user(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            json_path = Path(temp_dir) / "result.json"
+            json_path.write_text(
+                json.dumps(
+                    {
+                        "messages": [
+                            {
+                                "id": 30,
+                                "type": "message",
+                                "text": "<" + ("x" * 5000),
+                                "reply_to_message_id": 20,
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            fake_user = type("FakeUser", (), {"is_initialized": True, "send_message": AsyncMock(side_effect=[FakeSentMessage(1030), FakeSentMessage(1031)])})()
+            with patch("sync_worker.json_import.process.resolve_chat_id", AsyncMock(return_value=-100456)), \
+                 patch("sync_worker.json_import.process.build_link_rewrite_context", AsyncMock(return_value={})), \
+                 patch("sync_worker.json_import.process.resolve_reply_target", AsyncMock(return_value=999)), \
+                 patch("sync_worker.json_import.process.db.get_all_settings", AsyncMock(return_value={"sync_text": "1"})), \
+                 patch("sync_worker.json_import.process.db.add_msg_log", AsyncMock()), \
+                 patch("sync_worker.json_import.process.db.apply_message_filters", AsyncMock(side_effect=lambda text, *_: (False, text))), \
+                 patch("sync_worker.json_import.process.update_state_and_check_skip", AsyncMock(return_value=False)), \
+                 patch("sync_worker.json_import.process.record_success", AsyncMock()) as mock_record_success, \
+                 patch("sync_worker.json_import.process.bot_engine.pyro_user_app", fake_user), \
+                     patch("sync_worker.json_import.process.bot_engine.aiogram_bot"):
+                await json_sync.process_json_sync("user", "@target", str(json_path), 0, False)
+
+            self.assertEqual(fake_user.send_message.await_count, 2)
+            first_kwargs = fake_user.send_message.await_args_list[0].kwargs
+            second_kwargs = fake_user.send_message.await_args_list[1].kwargs
+            self.assertEqual(first_kwargs["reply_to_message_id"], 999)
+            self.assertNotIn("reply_to_message_id", second_kwargs)
+            mock_record_success.assert_awaited_once_with(0, -100456, 30, 1030, force_send=False)
 
     async def test_process_json_sync_user_text_accepts_pyrogram_message_id_field(self):
         with tempfile.TemporaryDirectory() as temp_dir:

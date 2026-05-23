@@ -26,7 +26,7 @@ def get_msg_meta(msg, mode):
 
     media_type = msg.get("media_type")
     json_map = {
-        "video_file": ("video", "sync_video"),
+        "video_file": ("document", "sync_document"),
         "animation": ("animation", "sync_gif"),
         "audio_file": ("audio", "sync_audio"),
         "voice_message": ("voice", "sync_voice"),
