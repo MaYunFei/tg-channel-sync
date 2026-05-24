@@ -1,5 +1,5 @@
 from .links import PYRO_MEDIA_CLS, rewrite_media_group_captions
-from .media import TYPE_MAP, get_media_reference, get_msg_meta, get_reply_source_msg_id, has_media_spoiler, resolve_json_media
+from .media import TYPE_MAP, get_media_reference, get_msg_meta, get_reply_source_msg_id, has_media_spoiler, is_json_video_file_visual, resolve_json_media
 from .progress import ProgressFSInputFile, UploadProgressTracker, build_pyro_progress_callback, format_upload_label
 from .text import build_json_text, has_text_spoiler, normalize_bot_html, normalize_pyro_html, prepend_source_header_html
 
@@ -16,6 +16,7 @@ __all__ = [
     "get_reply_source_msg_id",
     "has_media_spoiler",
     "has_text_spoiler",
+    "is_json_video_file_visual",
     "normalize_bot_html",
     "normalize_pyro_html",
     "prepend_source_header_html",

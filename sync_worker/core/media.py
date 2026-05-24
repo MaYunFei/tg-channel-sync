@@ -14,6 +14,17 @@ TYPE_MAP = {
 }
 
 
+def is_json_video_file_visual(msg) -> bool:
+    if not isinstance(msg, dict):
+        return False
+    if msg.get("media_type") != "video_file" or not msg.get("file"):
+        return False
+    mime_type = str(msg.get("mime_type") or "").lower()
+    if mime_type and not mime_type.startswith("video/"):
+        return False
+    return bool(msg.get("thumbnail") or msg.get("width") or msg.get("height") or msg.get("duration_seconds"))
+
+
 def get_msg_meta(msg, mode):
     if mode in ["api", "clone"]:
         for attr, key in TYPE_MAP.items():
@@ -26,7 +37,7 @@ def get_msg_meta(msg, mode):
 
     media_type = msg.get("media_type")
     json_map = {
-        "video_file": ("document", "sync_document"),
+        "video_file": ("video", "sync_video") if is_json_video_file_visual(msg) else ("document", "sync_document"),
         "animation": ("animation", "sync_gif"),
         "audio_file": ("audio", "sync_audio"),
         "voice_message": ("voice", "sync_voice"),
@@ -123,7 +134,7 @@ def resolve_json_media(msg, json_dir):
         if media_type == "sticker":
             return file_path, "sticker", None
         if media_type == "video_file":
-            return file_path, "document", None
+            return file_path, "video" if is_json_video_file_visual(msg) else "document", None
         if media_type == "animation":
             return file_path, "animation", None
         if media_type == "audio_file":

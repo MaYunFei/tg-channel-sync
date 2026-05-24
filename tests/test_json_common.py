@@ -83,11 +83,25 @@ class JsonCommonTests(unittest.TestCase):
         self.assertEqual(resolve_json_media(msg_animation, "X")[1], "animation")
         self.assertEqual(resolve_json_media(msg_sticker, "X")[1], "sticker")
 
-    def test_get_msg_meta_treats_json_video_file_as_document(self):
+    def test_get_msg_meta_treats_json_video_file_without_visual_metadata_as_document(self):
         self.assertEqual(
             get_msg_meta({"media_type": "video_file", "file": "video_files/a.mp4"}, "json"),
             ("document", "sync_document"),
         )
+
+    def test_get_msg_meta_treats_json_visual_video_file_as_video(self):
+        msg = {
+            "media_type": "video_file",
+            "mime_type": "video/mp4",
+            "file": "video_files/a.mp4",
+            "thumbnail": "video_files/a.mp4_thumb.jpg",
+            "width": 720,
+            "height": 404,
+            "duration_seconds": 3,
+        }
+
+        self.assertEqual(get_msg_meta(msg, "json"), ("video", "sync_video"))
+        self.assertEqual(resolve_json_media(msg, "X")[1], "video")
 
     def test_has_media_spoiler_reads_json_export_flag(self):
         self.assertTrue(has_media_spoiler({"media_spoiler": True}, "photo", "json"))

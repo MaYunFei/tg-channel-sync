@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ..core import get_msg_meta
+from ..core import get_msg_meta, is_json_video_file_visual
 from .helpers import JSON_MEDIA_GROUP_WINDOW_SECONDS
 
 JSON_MEDIA_GROUP_MAX_ITEMS = 10
@@ -22,7 +22,7 @@ def _json_reply_target(msg: dict) -> int:
 
 def _json_group_family(msg: dict) -> str | None:
     if msg.get("media_type") == "video_file" and msg.get("file"):
-        return "document"
+        return "visual" if is_json_video_file_visual(msg) else "document"
     msg_type, _ = get_msg_meta(msg, "json")
     if msg_type in {"photo", "video", "animation"}:
         return "visual"

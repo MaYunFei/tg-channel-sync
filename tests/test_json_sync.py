@@ -288,6 +288,49 @@ class JsonSyncTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([[item["id"] for item in group] for group in grouped], [[10, 11, 12]])
 
+    def test_group_json_messages_groups_visual_video_files_with_photo(self):
+        messages = [
+            {
+                "id": 38,
+                "type": "message",
+                "date_unixtime": "1778421550",
+                "media_type": "video_file",
+                "mime_type": "video/mp4",
+                "file": "video_files/640 (1).mp4",
+                "thumbnail": "video_files/640 (1).mp4_thumb.jpg",
+                "width": 720,
+                "height": 404,
+                "duration_seconds": 3,
+                "text": "caption",
+            },
+            {
+                "id": 39,
+                "type": "message",
+                "date_unixtime": "1778421550",
+                "media_type": "video_file",
+                "mime_type": "video/mp4",
+                "file": "video_files/640.mp4",
+                "thumbnail": "video_files/640.mp4_thumb.jpg",
+                "width": 626,
+                "height": 352,
+                "duration_seconds": 2,
+                "text": "",
+            },
+            {
+                "id": 40,
+                "type": "message",
+                "date_unixtime": "1778421550",
+                "photo": "photos/photo_1.jpg",
+                "width": 852,
+                "height": 1280,
+                "text": "",
+            },
+        ]
+
+        grouped = json_sync.group_json_messages(messages, 3)
+
+        self.assertEqual([[item["id"] for item in group] for group in grouped], [[38, 39, 40]])
+
     def test_split_json_text_for_send_keeps_html_balanced(self):
         text = "<b>" + ("x" * 5000) + "</b>"
 
