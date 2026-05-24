@@ -39,6 +39,19 @@ def _json_can_group_media(msg: dict) -> bool:
     return (_json_group_family(msg) or "") in {"visual", "audio", "document"}
 
 
+def _json_reply_keeps_group(group: list[dict], reply_to_message_id: int) -> bool:
+    if not reply_to_message_id:
+        return True
+
+    group_msg_ids = {int(item.get("id") or 0) for item in group}
+    if reply_to_message_id in group_msg_ids:
+        return True
+
+    group_reply_targets = {_json_reply_target(item) for item in group}
+    group_reply_targets.discard(0)
+    return group_reply_targets == {reply_to_message_id}
+
+
 def _json_should_append_to_heuristic_group(group: list[dict], msg: dict, window_seconds: int) -> bool:
     if not group or not _json_can_group_media(msg):
         return False
@@ -49,16 +62,11 @@ def _json_should_append_to_heuristic_group(group: list[dict], msg: dict, window_
     curr_id = int(msg.get("id") or 0)
     if curr_id != prev_id + 1:
         return False
-    reply_to_message_id = _json_reply_target(msg)
-    if reply_to_message_id:
-        # Telegram 导出的超长图片串有时会在同一时间窗口内把后续图片记成
-        # “回复首图”的普通消息。这里让窗口优先，只要回复目标仍在当前窗口内，
-        # 或者整组都回复同一个外部目标，就继续按同一媒体序列归并。
-        group_msg_ids = {int(item.get("id") or 0) for item in group}
-        group_reply_targets = {_json_reply_target(item) for item in group}
-        group_reply_targets.discard(0)
-        if reply_to_message_id not in group_msg_ids and group_reply_targets != {reply_to_message_id}:
-            return False
+    # Telegram 导出的超长图片串有时会在同一时间窗口内把后续图片记成
+    # “回复首图”的普通消息。这里让窗口优先，只要回复目标仍在当前窗口内，
+    # 或者整组都回复同一个外部目标，就继续按同一媒体序列归并。
+    if not _json_reply_keeps_group(group, _json_reply_target(msg)):
+        return False
     prev_ts = _json_message_timestamp(prev)
     curr_ts = _json_message_timestamp(msg)
     if prev_ts and curr_ts and curr_ts - prev_ts > max(1, int(window_seconds or JSON_MEDIA_GROUP_WINDOW_SECONDS)):

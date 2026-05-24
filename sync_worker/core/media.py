@@ -13,8 +13,11 @@ TYPE_MAP = {
     "sticker": "sync_sticker",
 }
 
+JSON_VIDEO_VISUAL_FIELDS = ("thumbnail", "width", "height", "duration_seconds")
 
-def is_json_video_file_visual(msg) -> bool:
+
+def is_json_video_file_visual(msg: dict) -> bool:
+    """Return True when Telegram JSON video_file has enough metadata to send as video."""
     if not isinstance(msg, dict):
         return False
     if msg.get("media_type") != "video_file" or not msg.get("file"):
@@ -22,7 +25,7 @@ def is_json_video_file_visual(msg) -> bool:
     mime_type = str(msg.get("mime_type") or "").lower()
     if mime_type and not mime_type.startswith("video/"):
         return False
-    return bool(msg.get("thumbnail") or msg.get("width") or msg.get("height") or msg.get("duration_seconds"))
+    return any(bool(msg.get(field)) for field in JSON_VIDEO_VISUAL_FIELDS)
 
 
 def get_msg_meta(msg, mode):

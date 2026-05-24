@@ -89,6 +89,16 @@ class JsonCommonTests(unittest.TestCase):
             ("document", "sync_document"),
         )
 
+    def test_get_msg_meta_treats_mime_only_json_video_file_as_document(self):
+        msg = {
+            "media_type": "video_file",
+            "mime_type": "video/mp4",
+            "file": "video_files/a.mp4",
+        }
+
+        self.assertEqual(get_msg_meta(msg, "json"), ("document", "sync_document"))
+        self.assertEqual(resolve_json_media(msg, "X")[1], "document")
+
     def test_get_msg_meta_treats_json_visual_video_file_as_video(self):
         msg = {
             "media_type": "video_file",
