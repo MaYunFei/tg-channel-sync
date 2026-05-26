@@ -24,6 +24,7 @@ from services.sync_services import (
     resolve_reply_for_forward,
     rewrite_message_links,
 )
+from sync_worker.core.media import has_media_spoiler
 from sync_worker.core.progress import (
     ProgressFSInputFile,
     UploadProgressTracker,
@@ -48,7 +49,9 @@ pyro_user_app = None
 upload_bots = []
 bot_api_mode = "cloud"
 dp = Dispatcher()
+MEDIA_GROUP_FLUSH_DELAY_SECONDS = 2.0
 media_group_cache = {}
+media_group_tasks = {}
 user_auth_state = {
     "client": None,
     "phone_number": "",
@@ -496,12 +499,12 @@ async def _send_realtime_media_via_user(target_id, msg_type, file_path, text_htm
     return sent.id
 
 
-async def _send_realtime_media_group_via_user(target_id, downloaded_files, captions, reply_to_id, quote_data, action_label):
+async def _send_realtime_media_group_via_user(target_id, downloaded_files, captions, reply_to_id, quote_data, action_label, spoiler_flags=None):
     if not getattr(pyro_user_app, "is_initialized", False):
         raise RuntimeError("实时同步使用辅助账号发送前，请先完成辅助账号登录")
     total_size = sum(os.path.getsize(path) for _, path, _ in downloaded_files)
     tracker = UploadProgressTracker("实时上传媒体组 [改用辅助账号]", total_size)
-    media = build_user_media_group(downloaded_files, captions, {})
+    media = build_user_media_group(downloaded_files, captions, {}, spoiler_flags=spoiler_flags)
     kwargs = {"chat_id": target_id, "media": media}
     if reply_to_id:
         kwargs["reply_to_message_id"] = reply_to_id
@@ -624,6 +627,7 @@ async def _send_realtime_media_group_upload(source_id, target_id, group, caption
                     reply_to_id,
                     quote_data,
                     f"实时媒体组辅助回退 {group[0].message_id}",
+                    spoiler_flags=[has_realtime_media_spoiler(item, get_msg_type(item)) for item in group],
                 )
 
             _, media = build_bot_media_group(downloaded_files, captions, {}, sum(file_sizes), upload_target["label"])
@@ -661,6 +665,7 @@ async def _send_realtime_media_group_upload(source_id, target_id, group, caption
                         reply_to_id,
                         quote_data,
                         f"实时媒体组辅助回退 {group[0].message_id}",
+                        spoiler_flags=[has_realtime_media_spoiler(item, get_msg_type(item)) for item in group],
                     )
                 raise
     finally:
@@ -676,6 +681,159 @@ async def is_type_allowed(msg_type: str) -> bool:
     key_map = {msg_type: f"sync_{msg_type}" for msg_type in MSG_TYPES}
     key_map["animation"] = "sync_gif"
     return settings.get(key_map.get(msg_type, "sync_text"), "1") == "1"
+
+
+def has_realtime_media_spoiler(message, msg_type):
+    return has_media_spoiler(message, msg_type, "api")
+
+
+async def _queue_realtime_media_group(message, source_id, target_mappings, chat_name):
+    cache_key = (source_id, str(message.media_group_id))
+    media_group_cache.setdefault(cache_key, []).append(message)
+
+    previous_task = media_group_tasks.get(cache_key)
+    if previous_task and not previous_task.done():
+        previous_task.cancel()
+
+    media_group_tasks[cache_key] = asyncio.create_task(
+        _flush_realtime_media_group_after_delay(cache_key, source_id, target_mappings, chat_name)
+    )
+
+
+async def _flush_realtime_media_group_after_delay(cache_key, source_id, target_mappings, chat_name):
+    try:
+        await asyncio.sleep(MEDIA_GROUP_FLUSH_DELAY_SECONDS)
+        await _process_realtime_media_group(cache_key, source_id, target_mappings, chat_name)
+    except asyncio.CancelledError:
+        return
+    finally:
+        current_task = asyncio.current_task()
+        if media_group_tasks.get(cache_key) is current_task:
+            media_group_tasks.pop(cache_key, None)
+
+
+async def _process_realtime_media_group(cache_key, source_id, target_mappings, chat_name):
+    group = sorted(media_group_cache.pop(cache_key, []), key=lambda item: item.message_id)
+    if not group:
+        return
+    quote_data = get_quote_payload(group[0])
+
+    include_external_source_header = _realtime_sync_options(target_mappings[0])["include_external_source_header"]
+
+    for item in group:
+        text_html = item.html_text if item.text or item.caption else ""
+        file_name = item.document.file_name if item.document else (item.video.file_name if item.video else "")
+        should_skip, _ = await db.apply_message_filters(text_html, True, file_name or "")
+        if should_skip:
+            await db.add_msg_log("DROP_REGEX", f"[{chat_name}] 媒体组消息ID:{[m.message_id for m in group]} | 已被正则过滤拦截")
+            return
+
+    msg_ids = [item.message_id for item in group]
+    await db.add_msg_log("RECV_GROUP", f"[{chat_name}] 媒体组消息ID:{msg_ids}")
+    for target_mapping in target_mappings:
+        target_id = target_mapping["target_id"]
+        realtime_options = _realtime_sync_options(target_mapping)
+        reply_to_id = await resolve_reply_for_forward(source_id, target_id, group[0].message_id, getattr(group[0], "reply_to_message_id", None))
+        try:
+            if any(_realtime_needs_reupload(get_msg_type(item), realtime_options) for item in group):
+                captions = []
+                link_context = await build_link_rewrite_context(aiogram_bot, source_id, target_id)
+                for item in group:
+                    item_text = item.html_text if item.text or item.caption else ""
+                    if include_external_source_header:
+                        item_text = prepend_source_header_html(item_text, item, enabled=True)
+                    item_text, _ = await rewrite_message_links(item_text, source_id, link_context)
+                    captions.append(item_text)
+                sent_ids = await _send_realtime_media_group_upload(
+                    source_id,
+                    target_id,
+                    group,
+                    captions,
+                    reply_to_id,
+                    quote_data,
+                    realtime_options,
+                )
+                if not sent_ids:
+                    continue
+                for original, sent_id in zip(group, sent_ids):
+                    await db.save_msg_mapping(source_id, original.message_id, target_id, sent_id)
+                await db.add_msg_log("SEND_GROUP", f"源频道:{source_id} | 目标频道:{target_id} | 媒体组消息ID:{msg_ids} | 重传成功")
+                continue
+            # 如果启用外部来源前缀，需要逐条复制并添加前缀
+            if include_external_source_header:
+                await db.add_msg_log("WARN", f"目标频道:{target_id} | 媒体组启用外部来源前缀，使用逐条复制模式")
+                for item in group:
+                    try:
+                        item_text = item.html_text if item.text or item.caption else ""
+                        # 添加外部来源前缀
+                        prefixed_text = prepend_source_header_html(item_text, item, enabled=True)
+
+                        kwargs = {"chat_id": target_id, "from_chat_id": source_id, "message_id": item.message_id}
+                        if prefixed_text != item_text:
+                            kwargs["caption"] = prefixed_text
+                            kwargs["parse_mode"] = "HTML"
+                        if reply_to_id:
+                            kwargs["reply_to_message_id"] = reply_to_id
+                        if quote_data and reply_to_id:
+                            kwargs["quote_text"] = quote_data["text"]
+                            if quote_data.get("entities"):
+                                kwargs["quote_entities"] = quote_data["entities"]
+                        copied = await execute_with_network_retry(
+                            lambda: aiogram_bot.copy_message(**kwargs),
+                            action_label=f"实时逐条复制 {item.message_id}",
+                            log_tag="REALTIME_NETWORK_RETRY",
+                        )
+                        await db.save_msg_mapping(source_id, item.message_id, target_id, copied.message_id)
+                        await asyncio.sleep(1)
+                    except Exception:
+                        pass
+            else:
+                # 正常的媒体组批量复制
+                kwargs = {"chat_id": target_id, "from_chat_id": source_id, "message_ids": msg_ids}
+                if reply_to_id:
+                    kwargs["reply_to_message_id"] = reply_to_id
+                if quote_data and reply_to_id:
+                    kwargs["quote_text"] = quote_data["text"]
+                    if quote_data.get("entities"):
+                        kwargs["quote_entities"] = quote_data["entities"]
+                copied_ids = await execute_with_network_retry(
+                    lambda: aiogram_bot.copy_messages(**kwargs),
+                    action_label=f"实时媒体组复制 {group[0].message_id}",
+                    log_tag="REALTIME_NETWORK_RETRY",
+                )
+                for original, copied in zip(group, copied_ids):
+                    await db.save_msg_mapping(source_id, original.message_id, target_id, copied.message_id)
+                if quote_data and reply_to_id:
+                    await db.add_msg_log("QUOTE_GROUP_SEND", f"源频道:{source_id} | 目标频道:{target_id} | 组首消息ID:{group[0].message_id} | 已保留引用回复")
+                await db.add_msg_log("SEND_GROUP", f"源频道:{source_id} | 目标频道:{target_id} | 媒体组消息ID:{msg_ids} | 转发成功")
+        except Exception:
+            await db.add_msg_log("WARN", f"目标频道:{target_id} | 媒体组整组复制失败，已改为逐条复制")
+            for item in group:
+                try:
+                    item_text = item.html_text if item.text or item.caption else ""
+                    # 如果启用外部来源前缀，添加前缀
+                    if include_external_source_header:
+                        item_text = prepend_source_header_html(item_text, item, enabled=True)
+
+                    kwargs = {"chat_id": target_id, "from_chat_id": source_id, "message_id": item.message_id}
+                    if include_external_source_header and item_text != (item.html_text if item.text or item.caption else ""):
+                        kwargs["caption"] = item_text
+                        kwargs["parse_mode"] = "HTML"
+                    if reply_to_id:
+                        kwargs["reply_to_message_id"] = reply_to_id
+                    if quote_data and reply_to_id:
+                        kwargs["quote_text"] = quote_data["text"]
+                        if quote_data.get("entities"):
+                            kwargs["quote_entities"] = quote_data["entities"]
+                    copied = await execute_with_network_retry(
+                        lambda: aiogram_bot.copy_message(**kwargs),
+                        action_label=f"实时媒体组回退逐条复制 {item.message_id}",
+                        log_tag="REALTIME_NETWORK_RETRY",
+                    )
+                    await db.save_msg_mapping(source_id, item.message_id, target_id, copied.message_id)
+                    await asyncio.sleep(1)
+                except Exception:
+                    pass
 
 
 @dp.channel_post()
@@ -696,132 +854,7 @@ async def handle_new_post(message: Message):
         return
 
     if message.media_group_id:
-        mg_id = message.media_group_id
-        if mg_id not in media_group_cache:
-            media_group_cache[mg_id] = [message]
-            await asyncio.sleep(2)
-            if mg_id in media_group_cache:
-                group = sorted(media_group_cache.pop(mg_id), key=lambda item: item.message_id)
-                quote_data = get_quote_payload(group[0])
-                
-                include_external_source_header = _realtime_sync_options(target_mappings[0])["include_external_source_header"]
-                
-                for item in group:
-                    text_html = item.html_text if item.text or item.caption else ""
-                    file_name = item.document.file_name if item.document else (item.video.file_name if item.video else "")
-                    should_skip, _ = await db.apply_message_filters(text_html, True, file_name or "")
-                    if should_skip:
-                        await db.add_msg_log("DROP_REGEX", f"[{chat_name}] 媒体组消息ID:{[m.message_id for m in group]} | 已被正则过滤拦截")
-                        return
-
-                msg_ids = [item.message_id for item in group]
-                await db.add_msg_log("RECV_GROUP", f"[{chat_name}] 媒体组消息ID:{msg_ids}")
-                for target_mapping in target_mappings:
-                    target_id = target_mapping["target_id"]
-                    realtime_options = _realtime_sync_options(target_mapping)
-                    reply_to_id = await resolve_reply_for_forward(source_id, target_id, group[0].message_id, getattr(group[0], "reply_to_message_id", None))
-                    try:
-                        if any(_realtime_needs_reupload(get_msg_type(item), realtime_options) for item in group):
-                            captions = []
-                            link_context = await build_link_rewrite_context(aiogram_bot, source_id, target_id)
-                            for item in group:
-                                item_text = item.html_text if item.text or item.caption else ""
-                                if include_external_source_header:
-                                    item_text = prepend_source_header_html(item_text, item, enabled=True)
-                                item_text, _ = await rewrite_message_links(item_text, source_id, link_context)
-                                captions.append(item_text)
-                            sent_ids = await _send_realtime_media_group_upload(
-                                source_id,
-                                target_id,
-                                group,
-                                captions,
-                                reply_to_id,
-                                quote_data,
-                                realtime_options,
-                            )
-                            if not sent_ids:
-                                continue
-                            for original, sent_id in zip(group, sent_ids):
-                                await db.save_msg_mapping(source_id, original.message_id, target_id, sent_id)
-                            await db.add_msg_log("SEND_GROUP", f"源频道:{source_id} | 目标频道:{target_id} | 媒体组消息ID:{msg_ids} | 重传成功")
-                            continue
-                        # 如果启用外部来源前缀，需要逐条复制并添加前缀
-                        if include_external_source_header:
-                            await db.add_msg_log("WARN", f"目标频道:{target_id} | 媒体组启用外部来源前缀，使用逐条复制模式")
-                            for item in group:
-                                try:
-                                    item_text = item.html_text if item.text or item.caption else ""
-                                    # 添加外部来源前缀
-                                    prefixed_text = prepend_source_header_html(item_text, item, enabled=True)
-                                    
-                                    kwargs = {"chat_id": target_id, "from_chat_id": source_id, "message_id": item.message_id}
-                                    if prefixed_text != item_text:
-                                        kwargs["caption"] = prefixed_text
-                                        kwargs["parse_mode"] = "HTML"
-                                    if reply_to_id:
-                                        kwargs["reply_to_message_id"] = reply_to_id
-                                    if quote_data and reply_to_id:
-                                        kwargs["quote_text"] = quote_data["text"]
-                                        if quote_data.get("entities"):
-                                            kwargs["quote_entities"] = quote_data["entities"]
-                                    copied = await execute_with_network_retry(
-                                        lambda: aiogram_bot.copy_message(**kwargs),
-                                        action_label=f"实时逐条复制 {item.message_id}",
-                                        log_tag="REALTIME_NETWORK_RETRY",
-                                    )
-                                    await db.save_msg_mapping(source_id, item.message_id, target_id, copied.message_id)
-                                    await asyncio.sleep(1)
-                                except Exception:
-                                    pass
-                        else:
-                            # 正常的媒体组批量复制
-                            kwargs = {"chat_id": target_id, "from_chat_id": source_id, "message_ids": msg_ids}
-                            if reply_to_id:
-                                kwargs["reply_to_message_id"] = reply_to_id
-                            if quote_data and reply_to_id:
-                                kwargs["quote_text"] = quote_data["text"]
-                                if quote_data.get("entities"):
-                                    kwargs["quote_entities"] = quote_data["entities"]
-                            copied_ids = await execute_with_network_retry(
-                                lambda: aiogram_bot.copy_messages(**kwargs),
-                                action_label=f"实时媒体组复制 {group[0].message_id}",
-                                log_tag="REALTIME_NETWORK_RETRY",
-                            )
-                            for original, copied in zip(group, copied_ids):
-                                await db.save_msg_mapping(source_id, original.message_id, target_id, copied.message_id)
-                            if quote_data and reply_to_id:
-                                await db.add_msg_log("QUOTE_GROUP_SEND", f"源频道:{source_id} | 目标频道:{target_id} | 组首消息ID:{group[0].message_id} | 已保留引用回复")
-                            await db.add_msg_log("SEND_GROUP", f"源频道:{source_id} | 目标频道:{target_id} | 媒体组消息ID:{msg_ids} | 转发成功")
-                    except Exception:
-                        await db.add_msg_log("WARN", f"目标频道:{target_id} | 媒体组整组复制失败，已改为逐条复制")
-                        for item in group:
-                            try:
-                                item_text = item.html_text if item.text or item.caption else ""
-                                # 如果启用外部来源前缀，添加前缀
-                                if include_external_source_header:
-                                    item_text = prepend_source_header_html(item_text, item, enabled=True)
-                                
-                                kwargs = {"chat_id": target_id, "from_chat_id": source_id, "message_id": item.message_id}
-                                if include_external_source_header and item_text != (item.html_text if item.text or item.caption else ""):
-                                    kwargs["caption"] = item_text
-                                    kwargs["parse_mode"] = "HTML"
-                                if reply_to_id:
-                                    kwargs["reply_to_message_id"] = reply_to_id
-                                if quote_data and reply_to_id:
-                                    kwargs["quote_text"] = quote_data["text"]
-                                    if quote_data.get("entities"):
-                                        kwargs["quote_entities"] = quote_data["entities"]
-                                copied = await execute_with_network_retry(
-                                    lambda: aiogram_bot.copy_message(**kwargs),
-                                    action_label=f"实时媒体组回退逐条复制 {item.message_id}",
-                                    log_tag="REALTIME_NETWORK_RETRY",
-                                )
-                                await db.save_msg_mapping(source_id, item.message_id, target_id, copied.message_id)
-                                await asyncio.sleep(1)
-                            except Exception:
-                                pass
-        else:
-            media_group_cache[mg_id].append(message)
+        await _queue_realtime_media_group(message, source_id, target_mappings, chat_name)
         return
     has_media = msg_type != "text"
     file_name = getattr(getattr(message, msg_type, None), "file_name", "") if msg_type in ["document", "video"] else ""

@@ -512,3 +512,64 @@ class SyncServiceTests(unittest.IsolatedAsyncioTestCase):
         # 应该标记为已改变
         self.assertTrue(changed2)
 
+    async def test_realtime_media_group_queue_debounces_and_separates_sources(self):
+        original_cache = bot_engine.media_group_cache
+        original_tasks = bot_engine.media_group_tasks
+        original_delay = bot_engine.MEDIA_GROUP_FLUSH_DELAY_SECONDS
+        bot_engine.media_group_cache = {}
+        bot_engine.media_group_tasks = {}
+        bot_engine.MEDIA_GROUP_FLUSH_DELAY_SECONDS = 60
+        try:
+            msg1 = type("Msg", (), {"media_group_id": "album", "message_id": 1})()
+            msg2 = type("Msg", (), {"media_group_id": "album", "message_id": 2})()
+            msg3 = type("Msg", (), {"media_group_id": "album", "message_id": 1})()
+
+            await bot_engine._queue_realtime_media_group(msg1, -100111, [{"target_id": -100999}], "源1")
+            first_task = bot_engine.media_group_tasks[(-100111, "album")]
+            await bot_engine._queue_realtime_media_group(msg2, -100111, [{"target_id": -100999}], "源1")
+            await asyncio.sleep(0)
+            await bot_engine._queue_realtime_media_group(msg3, -100222, [{"target_id": -100999}], "源2")
+
+            self.assertEqual([m.message_id for m in bot_engine.media_group_cache[(-100111, "album")]], [1, 2])
+            self.assertEqual([m.message_id for m in bot_engine.media_group_cache[(-100222, "album")]], [1])
+            self.assertTrue(first_task.cancelled())
+            self.assertIn((-100111, "album"), bot_engine.media_group_tasks)
+            self.assertIn((-100222, "album"), bot_engine.media_group_tasks)
+        finally:
+            for task in bot_engine.media_group_tasks.values():
+                task.cancel()
+            await asyncio.sleep(0)
+            bot_engine.media_group_cache = original_cache
+            bot_engine.media_group_tasks = original_tasks
+            bot_engine.MEDIA_GROUP_FLUSH_DELAY_SECONDS = original_delay
+
+    async def test_realtime_user_media_group_passes_spoiler_flags(self):
+        fake_sent = [type("Sent", (), {"id": 11})(), type("Sent", (), {"id": 12})()]
+        fake_user = type("FakeUser", (), {"is_initialized": True, "send_media_group": AsyncMock()})()
+        original_user = bot_engine.pyro_user_app
+        bot_engine.pyro_user_app = fake_user
+        downloaded_files = [(object(), "a.jpg", "photo"), (object(), "b.jpg", "photo")]
+        try:
+            with patch("bot_engine.os.path.getsize", return_value=10), \
+                 patch("bot_engine.build_user_media_group", Mock(return_value=["media1", "media2"])) as mock_build_group, \
+                 patch("bot_engine.execute_with_network_retry", AsyncMock(return_value=fake_sent)):
+                result = await bot_engine._send_realtime_media_group_via_user(
+                    -100999,
+                    downloaded_files,
+                    ["caption", ""],
+                    None,
+                    None,
+                    "测试媒体组",
+                    spoiler_flags=[True, False],
+                )
+
+            self.assertEqual(result, [11, 12])
+            mock_build_group.assert_called_once_with(
+                downloaded_files,
+                ["caption", ""],
+                {},
+                spoiler_flags=[True, False],
+            )
+        finally:
+            bot_engine.pyro_user_app = original_user
+
