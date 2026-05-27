@@ -16,6 +16,11 @@ LIBRARY_LOGGERS = (
     "tg-channel-sync",
 )
 
+NOISY_DEBUG_LOGGERS = (
+    "aiosqlite",
+    "pyrogram.session.session",
+)
+
 
 def configure_terminal_logging() -> None:
     app_cfg = get_config().get("app", {})
@@ -32,3 +37,5 @@ def configure_terminal_logging() -> None:
     root_logger.setLevel(level)
     for logger_name in LIBRARY_LOGGERS:
         logging.getLogger(logger_name).setLevel(level)
+    for logger_name in NOISY_DEBUG_LOGGERS:
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
