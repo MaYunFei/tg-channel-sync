@@ -51,6 +51,12 @@ class AppConfigTests(unittest.TestCase):
 
         self.assertEqual(config["sync"]["system_log_retention_limit"], 1000)
         self.assertEqual(config["sync"]["message_log_retention_limit"], 5000)
+        self.assertFalse(config["app"]["debug_terminal_logs"])
+
+    def test_debug_terminal_logs_normalizes_to_bool(self):
+        config = app_config.save_config({"app": {"debug_terminal_logs": 1}})
+
+        self.assertTrue(config["app"]["debug_terminal_logs"])
 
     def test_log_retention_invalid_values_fall_back_to_defaults(self):
         config = app_config.save_config(

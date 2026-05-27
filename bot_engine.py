@@ -43,6 +43,7 @@ from sync_worker.senders import (
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger("tg-channel-sync.bot")
 
 aiogram_bot = None
 pyro_user_app = None
@@ -74,6 +75,14 @@ def _telegram_config():
 
 def _proxy_config():
     return get_config()["proxy"]
+
+
+def _debug_terminal_logs_enabled() -> bool:
+    return bool(get_config().get("app", {}).get("debug_terminal_logs", False))
+
+
+def _message_preview(message: Message) -> str:
+    return (getattr(message, "text", None) or getattr(message, "caption", None) or "")[:200]
 
 
 def build_proxy_url():
@@ -785,8 +794,11 @@ async def _process_realtime_media_group(cache_key, source_id, target_mappings, c
                         )
                         await db.save_msg_mapping(source_id, item.message_id, target_id, copied.message_id)
                         await asyncio.sleep(1)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        await db.add_msg_log(
+                            "ERROR",
+                            f"源频道:{source_id} | 目标频道:{target_id} | 消息ID:{item.message_id} | 逐条发送失败: {exc}",
+                        )
             else:
                 # 正常的媒体组批量复制
                 kwargs = {"chat_id": target_id, "from_chat_id": source_id, "message_ids": msg_ids}
@@ -806,8 +818,8 @@ async def _process_realtime_media_group(cache_key, source_id, target_mappings, c
                 if quote_data and reply_to_id:
                     await db.add_msg_log("QUOTE_GROUP_SEND", f"源频道:{source_id} | 目标频道:{target_id} | 组首消息ID:{group[0].message_id} | 已保留引用回复")
                 await db.add_msg_log("SEND_GROUP", f"源频道:{source_id} | 目标频道:{target_id} | 媒体组消息ID:{msg_ids} | 转发成功")
-        except Exception:
-            await db.add_msg_log("WARN", f"目标频道:{target_id} | 媒体组整组复制失败，已改为逐条复制")
+        except Exception as exc:
+            await db.add_msg_log("WARN", f"目标频道:{target_id} | 媒体组整组复制失败，已改为逐条复制: {exc}")
             for item in group:
                 try:
                     item_text = item.html_text if item.text or item.caption else ""
@@ -832,8 +844,11 @@ async def _process_realtime_media_group(cache_key, source_id, target_mappings, c
                     )
                     await db.save_msg_mapping(source_id, item.message_id, target_id, copied.message_id)
                     await asyncio.sleep(1)
-                except Exception:
-                    pass
+                except Exception as item_exc:
+                    await db.add_msg_log(
+                        "ERROR",
+                        f"源频道:{source_id} | 目标频道:{target_id} | 消息ID:{item.message_id} | 媒体组回退逐条发送失败: {item_exc}",
+                    )
 
 
 @dp.channel_post()
@@ -842,6 +857,15 @@ async def handle_new_post(message: Message):
         return
 
     source_id = message.chat.id
+    if _debug_terminal_logs_enabled():
+        logger.debug(
+            "Bot 收到频道消息 | chat_id=%s chat=%s message_id=%s text=%s",
+            source_id,
+            get_chat_name(message.chat),
+            message.message_id,
+            _message_preview(message),
+        )
+
     target_mappings = await db.get_target_channel_mappings(source_id, source_mode="bot")
     if not target_mappings:
         return
@@ -949,6 +973,24 @@ async def handle_new_post(message: Message):
             await db.add_msg_log("ERROR", f"消息ID:{message.message_id} | 目标频道:{target_id} | 发送失败: {exc}")
 
 
+@dp.message()
+async def debug_log_bot_message(message: Message):
+    if not _debug_terminal_logs_enabled():
+        return
+
+    chat = getattr(message, "chat", None)
+    from_user = getattr(message, "from_user", None)
+    logger.debug(
+        "Bot 收到普通消息 | chat_id=%s chat_type=%s chat=%s from_user=%s message_id=%s text=%s",
+        getattr(chat, "id", None),
+        getattr(chat, "type", None),
+        get_chat_name(chat) if chat is not None else "",
+        getattr(from_user, "id", None),
+        getattr(message, "message_id", None),
+        _message_preview(message),
+    )
+
+
 @dp.edited_channel_post()
 async def handle_edited_post(message: Message):
     if aiogram_bot is None:
@@ -977,8 +1019,11 @@ async def handle_edited_post(message: Message):
             if rewrite_count:
                 await db.add_msg_log("LINK_REWRITE", f"源频道:{source_id} | 目标频道:{target_id} | 消息链接改写:{rewrite_count}处")
             await db.add_msg_log("EDIT", f"源消息ID:{msg_id} | 目标频道:{target_id} | 目标消息ID:{target_msg_id} | 编辑成功")
-        except Exception:
-            pass
+        except Exception as exc:
+            await db.add_msg_log(
+                "ERROR",
+                f"源消息ID:{msg_id} | 目标频道:{target_id} | 目标消息ID:{target_msg_id} | 编辑失败: {exc}",
+            )
 
 
 def _public_channel_peer(source_ref: str):

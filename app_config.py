@@ -45,6 +45,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "app": {
         "portable_mode": True,
         "log_level": "INFO",
+        "debug_terminal_logs": False,
     },
 }
 
@@ -79,6 +80,7 @@ def _normalize_config(config: dict[str, Any]) -> dict[str, Any]:
     proxy = merged["proxy"]
     server = merged["server"]
     sync = merged["sync"]
+    app = merged["app"]
 
     telegram["api_id"] = int(str(telegram.get("api_id", 0) or 0).strip() or 0)
     telegram["api_hash"] = str(telegram.get("api_hash", "") or "").strip()
@@ -117,6 +119,9 @@ def _normalize_config(config: dict[str, Any]) -> dict[str, Any]:
     sync["realtime_sender"] = "user" if str(sync.get("realtime_sender", "bot")).strip() == "user" else "bot"
     sync["realtime_fallback_to_user"] = bool(sync.get("realtime_fallback_to_user", True))
     sync["realtime_hash_perturb"] = bool(sync.get("realtime_hash_perturb", False))
+    app["portable_mode"] = bool(app.get("portable_mode", True))
+    app["log_level"] = str(app.get("log_level", "INFO") or "INFO").strip().upper() or "INFO"
+    app["debug_terminal_logs"] = bool(app.get("debug_terminal_logs", False))
     return merged
 
 

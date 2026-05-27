@@ -18,7 +18,7 @@ class LogUiConfigTests(unittest.TestCase):
         content = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
 
         self.assertIn("components:{ AppCard, SectionHeader, FormSection, FieldGroup, ActionBar, BotApiHint }", content)
-        self.assertIn("components:{ AppCard, SectionHeader, FormSection, FieldGroup, ActionBar, BotApiHint, UserAuthPanel }", content)
+        self.assertIn("components:{ AppCard, SectionHeader, FormSection, FieldGroup, ActionBar, BotApiHint, UserAuthPanel, SettingSectionNav, SettingGroup, ToggleField, FieldBadge }", content)
         self.assertIn("<form-section", content)
         self.assertIn("<field-group", content)
         self.assertIn("<action-bar", content)
@@ -28,6 +28,8 @@ class LogUiConfigTests(unittest.TestCase):
 
         self.assertIn("系统日志最大保留条数", content)
         self.assertIn("消息日志最大保留条数", content)
+        self.assertIn("Debug 模式：同步输出日志到终端", content)
+        self.assertIn("接入库日志", content)
         self.assertIn("导出可获取当前保留的全部日志", content)
 
     def test_home_page_binds_log_export_actions(self):

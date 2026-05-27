@@ -18,6 +18,7 @@ from app_config import get_config, get_setup_status, save_config
 from app_paths import ensure_runtime_dirs, static_dir, temp_dir
 from server_runtime import launch_browser_when_ready, reuse_existing_instance_or_exit, should_auto_open_browser
 from services.channel_mapping_sources import resolve_mapping_source
+from services.logging_config import configure_terminal_logging
 from services.sync_services import format_channel_check_error, normalize_channel_username, resolve_chat_id
 from services.version_service import GITHUB_REPO, get_local_version, get_remote_version_info, is_version_at_least
 from sync_worker.runtime import sync_state
@@ -309,6 +310,7 @@ async def get_runtime_config():
 async def update_runtime_config(request: Request):
     payload = await request.json()
     config = save_config(payload)
+    configure_terminal_logging()
     return {"status": "success", "message": "配置已保存", "config": config}
 
 
@@ -603,6 +605,7 @@ async def add_mapping(
             allow_public_user_fallback=allow_public_user_fallback,
         )
         tgt = await resolve_chat_id(loaded_bot_engine.aiogram_bot, target_id)
+        mapping_sender = "user" if source_mode == "public_user" else realtime_sender
         if src == tgt:
             message = "源频道和目标频道不能相同"
             await db.add_sys_log("WARNING", f"添加频道映射失败: {message} ({src} -> {tgt})")
@@ -621,7 +624,7 @@ async def add_mapping(
         await db.add_channel_mapping(
             src,
             tgt,
-            realtime_sender="user" if source_mode == "public_user" else realtime_sender,
+            realtime_sender=mapping_sender,
             realtime_fallback_to_user=realtime_fallback_to_user == "1",
             realtime_hash_perturb=realtime_hash_perturb == "1",
             source_mode=source_mode,
@@ -800,6 +803,7 @@ def run_server():
     SHUTDOWN_EVENT.clear()
     _cleanup_done = False
     config = get_config()
+    configure_terminal_logging()
     server_cfg = config["server"]
     host = str(server_cfg.get("host", "127.0.0.1") or "127.0.0.1")
     port = int(server_cfg.get("port", 8011))

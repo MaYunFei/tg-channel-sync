@@ -235,6 +235,21 @@ class SyncServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("77_", path_a)
         self.assertIn("78_", path_b)
 
+    async def test_debug_log_bot_message_writes_terminal_debug_only(self):
+        chat = type("Chat", (), {"id": -100123, "type": "supergroup", "username": None, "title": "测试群"})()
+        user = type("User", (), {"id": 42})()
+        message = type(
+            "Message",
+            (),
+            {"chat": chat, "from_user": user, "message_id": 9, "text": "hello", "caption": None},
+        )()
+
+        with patch("bot_engine.get_config", return_value={"app": {"debug_terminal_logs": True}}), \
+             patch("bot_engine.logger") as mock_logger:
+            await bot_engine.debug_log_bot_message(message)
+
+        mock_logger.debug.assert_called_once()
+
     async def test_safe_get_messages_falls_back_when_topics_parse_breaks_batch(self):
         msg1 = type("Msg", (), {"id": 1, "empty": False})()
         msg2 = type("Msg", (), {"id": 2, "empty": False})()
@@ -628,4 +643,27 @@ class SyncServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(source_ref, "")
         mock_can_receive.assert_not_awaited()
         fake_user.get_chat.assert_not_awaited()
+
+    async def test_realtime_edit_failure_is_logged(self):
+        fake_bot = type("Bot", (), {"edit_message_text": AsyncMock(side_effect=RuntimeError("cannot send"))})()
+        message = type(
+            "Msg",
+            (),
+            {"chat": type("Chat", (), {"id": -1001})(), "message_id": 10, "text": "new", "caption": None, "html_text": "new"},
+        )()
+        original_bot = bot_engine.aiogram_bot
+        bot_engine.aiogram_bot = fake_bot
+        try:
+            with patch("bot_engine.db.get_all_target_msg_mappings", AsyncMock(return_value=[(-1002, 20)])), \
+                 patch("bot_engine.db.apply_message_filters", AsyncMock(return_value=(False, "new"))), \
+                 patch("bot_engine.build_link_rewrite_context", AsyncMock(return_value={})), \
+                 patch("bot_engine.rewrite_message_links", AsyncMock(return_value=("new", 0))), \
+                 patch("bot_engine.db.add_msg_log", AsyncMock()) as mock_log:
+                await bot_engine.handle_edited_post(message)
+
+            mock_log.assert_awaited()
+            self.assertIn("编辑失败", mock_log.await_args.args[1])
+        finally:
+            bot_engine.aiogram_bot = original_bot
+
 

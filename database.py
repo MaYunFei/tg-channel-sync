@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from collections.abc import Awaitable, Callable
 
@@ -471,6 +472,28 @@ async def _append_log(table: str, fields: tuple[str, str], values: tuple[str, st
         )
 
     await _run_in_db(action, commit=True)
+    _emit_terminal_log(table, values)
+
+
+def _debug_terminal_logs_enabled() -> bool:
+    return bool(get_config().get("app", {}).get("debug_terminal_logs", False))
+
+
+def _terminal_log_level(label: str) -> int:
+    text = str(label or "").upper()
+    if "ERROR" in text or "FAIL" in text:
+        return logging.ERROR
+    if "WARN" in text or "DROP" in text:
+        return logging.WARNING
+    return logging.INFO
+
+
+def _emit_terminal_log(table: str, values: tuple[str, str]) -> None:
+    if not _debug_terminal_logs_enabled():
+        return
+    kind = "SYS" if table == "system_logs" else "MSG" if table == "message_logs" else table
+    label, detail = values
+    logging.getLogger("tg-channel-sync").log(_terminal_log_level(label), "[%s][%s] %s", kind, label, detail)
 
 
 def get_log_retention_limit(table: str) -> int:
