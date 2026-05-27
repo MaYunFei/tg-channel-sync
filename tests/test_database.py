@@ -42,6 +42,8 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mapping["realtime_sender"], "bot")
         self.assertTrue(mapping["realtime_fallback_to_user"])
         self.assertFalse(mapping["realtime_hash_perturb"])
+        self.assertEqual(mapping["source_mode"], "bot")
+        self.assertEqual(mapping["source_ref"], "")
         self.assertEqual(await database.get_target_msg_id(1001, 11, 2001), 99)
 
     async def test_system_log_retention_uses_configured_limit(self):
@@ -95,15 +97,45 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
                     "realtime_sender": "user",
                     "realtime_fallback_to_user": False,
                     "realtime_hash_perturb": True,
+                    "source_mode": "bot",
+                    "source_ref": "",
                 },
                 {
                     "target_id": 200,
                     "realtime_sender": "bot",
                     "realtime_fallback_to_user": True,
                     "realtime_hash_perturb": False,
+                    "source_mode": "bot",
+                    "source_ref": "",
                 },
             ],
         )
+
+    async def test_public_user_channel_mapping_groups(self):
+        await database.init_db()
+        await database.add_channel_mapping(
+            -1001,
+            -2001,
+            realtime_sender="user",
+            source_mode="public_user",
+            source_ref="public_source",
+            last_polled_message_id=10,
+        )
+        await database.add_channel_mapping(
+            -1001,
+            -2002,
+            realtime_sender="user",
+            source_mode="public_user",
+            source_ref="public_source",
+            last_polled_message_id=12,
+        )
+
+        [group] = await database.get_public_user_mapping_groups()
+
+        self.assertEqual(group["source_id"], -1001)
+        self.assertEqual(group["source_ref"], "public_source")
+        self.assertEqual(group["last_polled_message_id"], 12)
+        self.assertEqual([item["target_id"] for item in group["mappings"]], [-2002, -2001])
 
     async def test_channel_mapping_duplicate_and_cycle_detection(self):
         await database.init_db()

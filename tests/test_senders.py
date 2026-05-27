@@ -13,15 +13,21 @@ class SenderTargetTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_resolve_upload_target_falls_back_to_user_when_bot_size_not_supported(self):
         fake_user = object()
-        with patch("sync_worker.senders.targets.bot_engine.should_upload_via_bot", return_value=False):
+        with patch("bot_engine.should_upload_via_bot", return_value=False):
             target = await resolve_upload_target("bot", fake_user, [1024], allow_user_fallback=True)
         self.assertEqual(target["sender"], "user")
+
+    async def test_resolve_upload_target_does_not_use_user_when_fallback_disabled(self):
+        fake_user = object()
+        with patch("bot_engine.should_upload_via_bot", return_value=False):
+            with self.assertRaisesRegex(RuntimeError, "开启"):
+                await resolve_upload_target("bot", fake_user, [1024], allow_user_fallback=False)
 
     async def test_resolve_upload_target_uses_pool_bot_when_available(self):
         fake_user = object()
         fake_bot = object()
-        with patch("sync_worker.senders.targets.bot_engine.should_upload_via_bot", return_value=True), \
-             patch("sync_worker.senders.targets.bot_engine.acquire_upload_bot", AsyncMock(return_value={"client": fake_bot, "label": "Bot#1"})):
+        with patch("bot_engine.should_upload_via_bot", return_value=True), \
+             patch("bot_engine.acquire_upload_bot", AsyncMock(return_value={"client": fake_bot, "label": "Bot#1"})):
             target = await resolve_upload_target("bot", fake_user, [100])
         self.assertEqual(target["sender"], "bot")
         self.assertIs(target["client"], fake_bot)

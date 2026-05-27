@@ -82,6 +82,14 @@ async def resolve_chat_id(bot, chat_ref: str) -> int:
         raise ValueError(f"无法解析频道 {chat_ref}: {exc}") from exc
 
 
+def format_channel_check_error(exc: Exception, *, subject: str = "频道信息") -> str:
+    detail = str(exc or "").strip()
+    suffix = f" 原始错误：{detail}" if detail else ""
+    if is_temporary_network_error(exc):
+        return f"{subject}检查失败：当前网络连接异常，暂时无法向 Telegram 校验频道，请稍后重试。{suffix}"
+    return f"{subject}检查失败，请确认频道 ID、@用户名或 t.me 链接是否正确，并确认 Bot/辅助账号有访问权限。{suffix}"
+
+
 def get_quote_payload(message):
     quote = getattr(message, "quote", None)
     if not quote or not getattr(quote, "text", None):

@@ -17,6 +17,7 @@ from services.sync_services import (
     build_link_rewrite_context,
     build_json_source_scope_id,
     execute_with_network_retry,
+    format_channel_check_error,
     log_sync_error,
     normalize_channel_username,
     resolve_chat_id,
@@ -584,7 +585,11 @@ async def process_json_sync(
 
     messages = data.get("messages", [])
     json_dir = os.path.dirname(os.path.abspath(json_path))
-    target_id = await resolve_chat_id(bot_engine.aiogram_bot, target_id_raw)
+    try:
+        target_id = await resolve_chat_id(bot_engine.aiogram_bot, target_id_raw)
+    except Exception as exc:
+        await log_sync_error("JSON 任务中止", RuntimeError(format_channel_check_error(exc, subject="目标频道信息")))
+        return
     source_username = normalize_channel_username(json_source_username)
     source_scope_id = 0
     if source_username:

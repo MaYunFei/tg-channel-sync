@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from pyrogram.enums import ParseMode
 
-import bot_engine
-
 
 def should_fallback_to_user(sender: str, fallback_to_user: bool) -> bool:
     return sender == "bot" and bool(fallback_to_user)
@@ -17,6 +15,8 @@ async def resolve_upload_target(
     allow_user_fallback: bool = True,
     wait_for_available_bot: bool = True,
 ):
+    import bot_engine
+
     total_size = sum(file_sizes)
     if sender != "bot":
         return {"sender": "user", "client": user_client, "parse_mode": ParseMode.HTML, "label": "辅助账号", "bytes": total_size}

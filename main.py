@@ -17,7 +17,8 @@ import database as db
 from app_config import get_config, get_setup_status, save_config
 from app_paths import ensure_runtime_dirs, static_dir, temp_dir
 from server_runtime import launch_browser_when_ready, reuse_existing_instance_or_exit, should_auto_open_browser
-from services.sync_services import normalize_channel_username, resolve_chat_id
+from services.channel_mapping_sources import resolve_mapping_source
+from services.sync_services import format_channel_check_error, normalize_channel_username, resolve_chat_id
 from services.version_service import GITHUB_REPO, get_local_version, get_remote_version_info, is_version_at_least
 from sync_worker.runtime import sync_state
 
@@ -41,6 +42,7 @@ bot_engine_module = None
 bot_engine_load_task = None
 process_master_sync = None
 polling_task = None
+public_channel_polling_task = None
 startup_task = None
 TEMP_DIR = str(temp_dir())
 _cleanup_done = False
@@ -105,8 +107,17 @@ def _user_auth_status_before_engine_loaded():
     }
 
 
+def _ensure_public_channel_polling(loaded_bot_engine) -> None:
+    global public_channel_polling_task
+    if public_channel_polling_task is None or public_channel_polling_task.done():
+        public_channel_polling_task = asyncio.create_task(
+            loaded_bot_engine.poll_public_user_channel_mappings(),
+            name="public-channel-mapping-poller",
+        )
+
+
 async def _force_cleanup():
-    global polling_task, startup_task
+    global polling_task, public_channel_polling_task, startup_task
     SHUTDOWN_EVENT.set()
     sync_state["stop_requested"] = True
 
@@ -140,6 +151,16 @@ async def _force_cleanup():
         except Exception:
             pass
         polling_task = None
+
+    if public_channel_polling_task:
+        public_channel_polling_task.cancel()
+        try:
+            await asyncio.wait_for(public_channel_polling_task, timeout=5)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+        except Exception:
+            pass
+        public_channel_polling_task = None
 
     if loaded_bot_engine is not None:
         await loaded_bot_engine.close_user_client()
@@ -176,7 +197,7 @@ def _reset_startup_app_info() -> None:
 
 
 async def _initialize_clients_in_background() -> None:
-    global polling_task
+    global polling_task, public_channel_polling_task
     if SHUTDOWN_EVENT.is_set():
         return
     loaded_bot_engine = await _ensure_bot_engine_loaded()
@@ -216,6 +237,7 @@ async def _initialize_clients_in_background() -> None:
             user_me = await asyncio.wait_for(loaded_bot_engine.start_user_client_if_authorized(), timeout=30)
             if user_me:
                 refresh_app_info(user_info={"name": user_me.first_name, "status": STATUS_LOGGED_IN})
+                _ensure_public_channel_polling(loaded_bot_engine)
             else:
                 refresh_app_info(user_info={"name": "", "status": STATUS_LOGIN_REQUIRED})
         except asyncio.CancelledError:
@@ -340,6 +362,7 @@ async def send_user_auth_code(request: Request):
         if result["status"] == "authorized":
             user = result["user"]
             refresh_app_info(user_info={"name": user["name"], "status": STATUS_LOGGED_IN})
+            _ensure_public_channel_polling(loaded_bot_engine)
         else:
             refresh_app_info(user_info={"name": "", "status": "等待验证码"})
         return result
@@ -356,6 +379,7 @@ async def sign_in_user_auth(request: Request):
         if result["status"] == "authorized":
             user = result["user"]
             refresh_app_info(user_info={"name": user["name"], "status": STATUS_LOGGED_IN})
+            _ensure_public_channel_polling(loaded_bot_engine)
         elif result["status"] == "password_required":
             refresh_app_info(user_info={"name": "", "status": "等待两步验证"})
         return result
@@ -371,6 +395,7 @@ async def check_user_auth_password(request: Request):
         result = await loaded_bot_engine.complete_user_password(payload.get("password", ""))
         user = result["user"]
         refresh_app_info(user_info={"name": user["name"], "status": STATUS_LOGGED_IN})
+        _ensure_public_channel_polling(loaded_bot_engine)
         return result
     except Exception as exc:
         return {"status": "error", "message": str(exc)}
@@ -538,6 +563,9 @@ async def get_mappings():
             "realtime_sender": row[2] or "bot",
             "realtime_fallback_to_user": bool(row[3]),
             "realtime_hash_perturb": bool(row[4]),
+            "source_mode": row[5] or "bot",
+            "source_ref": row[6] or "",
+            "last_polled_message_id": int(row[7] or 0),
         }
         for row in await db.get_all_channel_mappings()
     ]
@@ -568,7 +596,12 @@ async def add_mapping(
             loaded_bot_engine = await _ensure_bot_engine_loaded()
         if loaded_bot_engine.aiogram_bot is None and _bot_is_initializing():
             return {"status": "error", "message": "Bot 初始化中，请稍后重试"}
-        src = await resolve_chat_id(loaded_bot_engine.aiogram_bot, source_id)
+        allow_public_user_fallback = realtime_fallback_to_user == "1"
+        src, source_mode, source_ref = await resolve_mapping_source(
+            loaded_bot_engine,
+            source_id,
+            allow_public_user_fallback=allow_public_user_fallback,
+        )
         tgt = await resolve_chat_id(loaded_bot_engine.aiogram_bot, target_id)
         if src == tgt:
             message = "源频道和目标频道不能相同"
@@ -582,18 +615,28 @@ async def add_mapping(
             message = "该映射会形成循环同步，已拒绝保存"
             await db.add_sys_log("WARNING", f"添加频道映射失败: {message} ({src} -> {tgt})")
             return {"status": "error", "message": message}
+        last_polled_message_id = 0
+        if source_mode == "public_user":
+            last_polled_message_id = await loaded_bot_engine.get_public_channel_last_message_id(source_ref)
         await db.add_channel_mapping(
             src,
             tgt,
-            realtime_sender=realtime_sender,
+            realtime_sender="user" if source_mode == "public_user" else realtime_sender,
             realtime_fallback_to_user=realtime_fallback_to_user == "1",
             realtime_hash_perturb=realtime_hash_perturb == "1",
+            source_mode=source_mode,
+            source_ref=source_ref,
+            last_polled_message_id=last_polled_message_id,
         )
-        await db.add_sys_log("INFO", f"添加频道映射: {src} -> {tgt}")
+        if source_mode == "public_user":
+            _ensure_public_channel_polling(loaded_bot_engine)
+        mode_label = f"public:@{source_ref}" if source_mode == "public_user" else str(src)
+        await db.add_sys_log("INFO", f"添加频道映射: {mode_label} -> {tgt}")
         return {"status": "success", "message": "映射规则添加成功"}
     except Exception as exc:
-        await db.add_sys_log("WARNING", f"添加频道映射失败: {exc}")
-        return {"status": "error", "message": str(exc)}
+        message = format_channel_check_error(exc)
+        await db.add_sys_log("WARNING", f"添加频道映射失败: {message}")
+        return {"status": "error", "message": message}
 
 
 @app.delete("/api/mappings/{source_id}")
@@ -706,6 +749,15 @@ async def start_sync(
         return {"status": "error", "message": "请先完成辅助账号登录"}
     if mode == "json" and sender == "user" and not loaded_bot_engine.pyro_user_app:
         return {"status": "error", "message": "JSON 导入使用辅助账号发送前，请先完成辅助账号登录"}
+
+    try:
+        if mode in {"api", "clone"}:
+            await resolve_chat_id(loaded_bot_engine.aiogram_bot, source_id)
+        await resolve_chat_id(loaded_bot_engine.aiogram_bot, target_id)
+    except Exception as exc:
+        message = format_channel_check_error(exc)
+        await db.add_sys_log("WARNING", f"启动任务失败: {message}")
+        return {"status": "error", "message": message}
 
     json_media_group_window_seconds = getattr(
         json_media_group_window_seconds,

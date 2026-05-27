@@ -15,6 +15,7 @@ from services.sync_services import (
     build_link_rewrite_context,
     create_progress_callback,
     execute_with_network_retry,
+    format_channel_check_error,
     get_quote_payload,
     log_sync_error,
     resolve_chat_id,
@@ -213,6 +214,7 @@ async def sync_single_message(
     hash_perturb=False,
     clone_fallback_to_user=True,
     include_external_source_header: bool = False,
+    source_username_override: str | None = None,
 ):
     msg_type, _ = get_msg_meta(msg, mode)
     has_media = msg_type != "text"
@@ -228,7 +230,12 @@ async def sync_single_message(
         return
 
     reply_to_id = await resolve_reply_target(source_id, target_id, get_reply_source_msg_id(msg, mode), mode.upper(), msg.id)
-    link_context = await build_link_rewrite_context(bot_engine.aiogram_bot, source_id, target_id)
+    link_context = await build_link_rewrite_context(
+        bot_engine.aiogram_bot,
+        source_id,
+        target_id,
+        source_username_override=source_username_override,
+    )
     new_html, rewrite_count = await rewrite_message_links(new_html, source_id, link_context)
     new_html = _normalize_sync_html(mode, new_html)
     media_has_spoiler = has_media_spoiler(msg, msg_type, mode)
@@ -537,6 +544,7 @@ async def sync_media_group(
     hash_perturb=False,
     clone_fallback_to_user=True,
     include_external_source_header: bool = False,
+    source_username_override: str | None = None,
 ):
     if await update_state_and_check_skip(source_id, target_id, group[0].id, "[媒体组]", force_send=force_send):
         return
@@ -547,6 +555,7 @@ async def sync_media_group(
         source_id,
         target_id,
         group,
+        source_username_override=source_username_override,
         include_external_source_header=include_external_source_header,
     )
     spoiler_flags = []
@@ -960,7 +969,7 @@ async def process_master_sync(
         source_id = 0 if mode == "json" else await resolve_chat_id(bot_engine.aiogram_bot, source_id_raw)
         target_id = await resolve_chat_id(bot_engine.aiogram_bot, target_id_raw)
     except Exception as exc:
-        await log_sync_error("任务中止，频道有误", exc)
+        await log_sync_error("任务中止", RuntimeError(format_channel_check_error(exc)))
         sync_state["is_syncing"] = False
         return
 

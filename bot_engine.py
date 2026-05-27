@@ -842,7 +842,7 @@ async def handle_new_post(message: Message):
         return
 
     source_id = message.chat.id
-    target_mappings = await db.get_target_channel_mappings(source_id)
+    target_mappings = await db.get_target_channel_mappings(source_id, source_mode="bot")
     if not target_mappings:
         return
 
@@ -979,6 +979,24 @@ async def handle_edited_post(message: Message):
             await db.add_msg_log("EDIT", f"源消息ID:{msg_id} | 目标频道:{target_id} | 目标消息ID:{target_msg_id} | 编辑成功")
         except Exception:
             pass
+
+
+def _public_channel_peer(source_ref: str):
+    from sync_worker.realtime.public_poller import public_channel_peer
+
+    return public_channel_peer(source_ref)
+
+
+async def get_public_channel_last_message_id(source_ref: str) -> int:
+    from sync_worker.realtime.public_poller import get_public_channel_last_message_id as get_last_message_id
+
+    return await get_last_message_id(pyro_user_app, source_ref)
+
+
+async def poll_public_user_channel_mappings():
+    from sync_worker.realtime.public_poller import poll_public_user_channel_mappings as poll_mappings
+
+    return await poll_mappings(lambda: aiogram_bot, lambda: pyro_user_app)
 
 
 def init_user_client():

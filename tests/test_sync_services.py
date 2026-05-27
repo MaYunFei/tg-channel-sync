@@ -28,6 +28,13 @@ class FakeBot:
         return FakeChat(-100123 if str(ref).startswith("@source") else -100456)
 
 
+class FakePyroApp:
+    is_initialized = True
+
+    async def get_chat(self, ref):
+        return type("Chat", (), {"id": int(ref), "username": ""})()
+
+
 class SyncServiceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -44,6 +51,17 @@ class SyncServiceTests(unittest.IsolatedAsyncioTestCase):
         database.DB_FILE = self.original_db_file
         database.ensure_runtime_dirs = self.original_ensure_dirs
         self.temp_dir.cleanup()
+
+    def test_format_channel_check_error_distinguishes_network_errors(self):
+        message = sync_services.format_channel_check_error(RuntimeError("HTTP Client says - ClientOSError:"))
+
+        self.assertIn("网络连接异常", message)
+        self.assertNotIn("请确认频道 ID", message)
+
+    def test_format_channel_check_error_for_parse_or_permission_errors(self):
+        message = sync_services.format_channel_check_error(RuntimeError("chat not found"))
+
+        self.assertIn("请确认频道 ID", message)
 
     async def test_resolve_chat_id_supports_username_and_url(self):
         bot = FakeBot()
@@ -572,4 +590,42 @@ class SyncServiceTests(unittest.IsolatedAsyncioTestCase):
             )
         finally:
             bot_engine.pyro_user_app = original_user
+
+    def test_public_channel_peer_accepts_username_and_numeric_id(self):
+        self.assertEqual(bot_engine._public_channel_peer("@source"), "@source")
+        self.assertEqual(bot_engine._public_channel_peer("source"), "@source")
+        self.assertEqual(bot_engine._public_channel_peer("-100123"), -100123)
+
+    async def test_mapping_source_numeric_id_falls_back_when_bot_cannot_receive(self):
+        from services import channel_mapping_sources
+
+        engine = type("Engine", (), {"aiogram_bot": object(), "pyro_user_app": FakePyroApp()})()
+        with patch("services.channel_mapping_sources.bot_can_receive_channel_posts", AsyncMock(return_value=False)):
+            source_id, source_mode, source_ref = await channel_mapping_sources.resolve_mapping_source(
+                engine,
+                "-100123",
+                allow_public_user_fallback=True,
+            )
+
+        self.assertEqual(source_id, -100123)
+        self.assertEqual(source_mode, "public_user")
+        self.assertEqual(source_ref, "-100123")
+
+    async def test_mapping_source_does_not_touch_user_when_fallback_disabled(self):
+        from services import channel_mapping_sources
+
+        fake_user = type("User", (), {"is_initialized": True, "get_chat": AsyncMock()})()
+        engine = type("Engine", (), {"aiogram_bot": object(), "pyro_user_app": fake_user})()
+        with patch("services.channel_mapping_sources.bot_can_receive_channel_posts", AsyncMock()) as mock_can_receive:
+            source_id, source_mode, source_ref = await channel_mapping_sources.resolve_mapping_source(
+                engine,
+                "-100123",
+                allow_public_user_fallback=False,
+            )
+
+        self.assertEqual(source_id, -100123)
+        self.assertEqual(source_mode, "bot")
+        self.assertEqual(source_ref, "")
+        mock_can_receive.assert_not_awaited()
+        fake_user.get_chat.assert_not_awaited()
 

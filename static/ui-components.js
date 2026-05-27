@@ -130,8 +130,12 @@ const MappingOptionBadges = {
   computed: {
     badges() {
       const item = this.item || {};
-      const values = [item.realtime_sender === "user" ? "辅助账号" : "Bot"];
-      if (item.realtime_sender === "bot" && item.realtime_fallback_to_user) values.push("Bot 失败后改用辅助账号");
+      const values = [`发送:${item.realtime_sender === "user" ? "辅助账号" : "Bot"}`];
+      if (item.source_mode === "public_user") {
+        values.push("获取:辅助账号");
+      } else {
+        values.push(`获取:${item.realtime_fallback_to_user ? "Bot/辅助账号" : "Bot"}`);
+      }
       if (item.realtime_hash_perturb) values.push("重置指纹");
       return values;
     },

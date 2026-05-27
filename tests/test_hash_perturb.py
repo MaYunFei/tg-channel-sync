@@ -15,6 +15,7 @@ class HashPerturbTests(unittest.TestCase):
             with patch("main.sync_state", {"is_syncing": False}), \
                  patch("main.bot_engine.aiogram_bot", object()), \
                  patch("main.bot_engine.pyro_user_app", object()), \
+                 patch("main.resolve_chat_id", AsyncMock(side_effect=[-1001, -1002])), \
                  patch("main.db.add_sys_log", AsyncMock()), \
                  patch("main.process_master_sync", AsyncMock()):
                 result = await main.start_sync(
