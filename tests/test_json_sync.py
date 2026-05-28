@@ -561,12 +561,17 @@ class JsonSyncTests(unittest.IsolatedAsyncioTestCase):
                 mock_app.is_initialized = True
                 mock_app.send_media_group = mock_send
 
-                await json_sync.send_json_media_group(group, -100456, temp_dir, 0, False, {}, "bot", True)
+                result = await json_sync.send_json_media_group(group, -100456, temp_dir, 0, False, {}, "bot", True)
 
             self.assertEqual(mock_send.await_count, 1)
+            self.assertEqual(result, json_sync.JSON_GROUP_SENT_UNMAPPED)
             mock_record_success.assert_not_awaited()
             self.assertIn(
                 ("JSON_TOPICS_COMPAT", "组首消息ID:1 | 辅助账号发送后返回 topics 解析异常，已停止重试避免重复发送"),
+                [call.args for call in mock_add_msg_log.await_args_list],
+            )
+            self.assertIn(
+                ("JSON_GROUP_SEND_UNMAPPED", "组首消息ID:1 | 共 2 条 | 目标:[-100456] | 可能已发送，回包解析失败，未记录映射"),
                 [call.args for call in mock_add_msg_log.await_args_list],
             )
 

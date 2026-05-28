@@ -68,6 +68,11 @@ from .helpers import (
 )
 from ..json_import import process_json_sync
 
+SYNC_RESULT_SENT_MAPPED = "sent_mapped"
+SYNC_RESULT_SENT_UNMAPPED = "sent_unmapped"
+SYNC_RESULT_SKIPPED = "skipped"
+SYNC_RESULT_FAILED = "failed"
+
 
 def _normalize_sync_html(mode: str, html_text: str | None) -> str:
     return normalize_pyro_html(html_text) if mode == "api" else normalize_bot_html(html_text)
@@ -296,9 +301,9 @@ async def sync_single_message(
 
     should_skip, new_html = await db.apply_message_filters(text_html, has_media, file_name or "")
     if should_skip or (not has_media and not new_html.strip()):
-        return
+        return SYNC_RESULT_SKIPPED
     if await update_state_and_check_skip(source_id, target_id, msg.id, new_html[:50] or "[媒体]", force_send=force_send):
-        return
+        return SYNC_RESULT_SKIPPED
 
     reply_to_id = await resolve_reply_target(source_id, target_id, get_reply_source_msg_id(msg, mode), mode.upper(), msg.id)
     link_context = await build_link_rewrite_context(
@@ -443,7 +448,7 @@ async def sync_single_message(
                             continue
                         await asyncio.sleep(2)
                 if not file_path or sync_state["stop_requested"]:
-                    return
+                    return SYNC_RESULT_FAILED
 
                 file_path = await prepare_media_for_send(file_path, msg_type, msg.id, hash_perturb)
                 file_size = os.path.getsize(file_path)
@@ -584,22 +589,25 @@ async def sync_single_message(
                     except Exception:
                         pass
                 if sent_id is None:
-                    return
+                    return SYNC_RESULT_FAILED
 
         await record_success(source_id, target_id, msg.id, sent_id, force_send=force_send)
         if mode == "clone" and quote_data and reply_to_id:
             await db.add_msg_log("CLONE_QUOTE_SEND", f"原始:[{source_id}] 消息ID:{msg.id} | 已按引用回复发送")
         await db.add_msg_log(f"{mode.upper()}_SEND", f"原始:[{source_id}] 消息ID:{msg.id} | 目标:[{target_id}] 新ID:{sent_id} | 同步成功")
+        result = SYNC_RESULT_SENT_MAPPED
     except Exception as exc:
         if mode == "api" and _is_chat_forwards_restricted(exc):
             raise RuntimeError("该频道不支持转发，请使用下载重传") from exc
         if isinstance(exc, SyncNetworkRetryExhaustedError):
             raise
         if sync_state["stop_requested"]:
-            return
+            return SYNC_RESULT_FAILED
         await log_sync_error(f"单条同步异常 ID {msg.id}", exc)
+        result = SYNC_RESULT_FAILED
 
     await asyncio.sleep(safe_delay)
+    return result
 
 
 async def sync_media_group(
@@ -618,7 +626,7 @@ async def sync_media_group(
     source_username_override: str | None = None,
 ):
     if await update_state_and_check_skip(source_id, target_id, group[0].id, "[媒体组]", force_send=force_send):
-        return
+        return SYNC_RESULT_SKIPPED
 
     reply_to_id = await resolve_reply_target(source_id, target_id, get_reply_source_msg_id(group[0], mode), mode.upper(), group[0].id)
     quote_data = get_quote_payload(group[0])
@@ -634,6 +642,7 @@ async def sync_media_group(
         item_type, _ = get_msg_meta(item, mode)
         spoiler_flags.append(has_media_spoiler(item, item_type, mode))
     group_has_spoiler = any(spoiler_flags)
+    result = SYNC_RESULT_FAILED
 
     if mode == "api":
         for _ in range(3):
@@ -663,9 +672,15 @@ async def sync_media_group(
                     await db.add_msg_log("API_GROUP_CAPTION_REWRITE", f"原始:[{source_id}] 组首ID:{group[0].id} | 命中 {caption_rewrite_count} 个 caption 链接改写")
                 if quote_data and reply_to_id:
                     await db.add_msg_log("API_QUOTE_GROUP_SEND", f"原始:[{source_id}] 组首ID:{group[0].id} | 已按引用回复发送媒体组")
+                result = SYNC_RESULT_SENT_MAPPED
                 break
             except TypeError as exc:
                 if "topics" in str(exc):
+                    await db.add_msg_log(
+                        "API_TOPICS_COMPAT",
+                        f"原始:[{source_id}] 组首ID:{group[0].id} | 回包 topics 解析异常，可能已发送但未记录映射",
+                    )
+                    result = SYNC_RESULT_SENT_UNMAPPED
                     break
             except Exception as exc:
                 if "STOP_REQUESTED" in str(exc):
@@ -756,7 +771,7 @@ async def sync_media_group(
                     os.remove(path)
                 except Exception:
                     pass
-            return
+            return SYNC_RESULT_FAILED
 
         if hash_perturb:
             perturbed_files = []
@@ -830,6 +845,7 @@ async def sync_media_group(
                     "CLONE_GROUP_SEND",
                     f"原始:[{source_id}] 组首ID:{group[0].id} | 目标:[{target_id}] 共 {len(group)} 项 | 同步成功",
                 )
+                result = SYNC_RESULT_SENT_MAPPED
                 break
             except Exception as exc:
                 if "STOP_REQUESTED" in str(exc):
@@ -844,8 +860,9 @@ async def sync_media_group(
                     sent_group_success = True
                     await db.add_msg_log(
                         "CLONE_GROUP_SEND",
-                        f"原始:[{source_id}] 组首ID:{group[0].id} | 目标:[{target_id}] 共 {len(group)} 项 | 已发送，回包解析兼容处理",
+                        f"原始:[{source_id}] 组首ID:{group[0].id} | 目标:[{target_id}] 共 {len(group)} 项 | 可能已发送，回包解析失败，未记录映射",
                     )
+                    result = SYNC_RESULT_SENT_UNMAPPED
                     break
                 if actual_sender == "bot" and _is_request_entity_too_large(exc):
                     bot_size_limit_hit = True
@@ -921,6 +938,8 @@ async def sync_media_group(
                     "CLONE_GROUP_SEND",
                     f"原始:[{source_id}] 组首ID:{first_id} | 目标:[{target_id}] 共 {len(group)} 项 | 已改用辅助账号发送成功",
                 )
+                sent_group_success = True
+                result = SYNC_RESULT_SENT_MAPPED
             except Exception as exc:
                 if _is_topics_parse_error(exc):
                     await db.add_msg_log(
@@ -929,8 +948,10 @@ async def sync_media_group(
                     )
                     await db.add_msg_log(
                         "CLONE_GROUP_SEND",
-                        f"原始:[{source_id}] 组首ID:{first_id} | 目标:[{target_id}] 共 {len(group)} 项 | 已发送，回包解析兼容处理",
+                        f"原始:[{source_id}] 组首ID:{first_id} | 目标:[{target_id}] 共 {len(group)} 项 | 可能已发送，回包解析失败，未记录映射",
                     )
+                    sent_group_success = True
+                    result = SYNC_RESULT_SENT_UNMAPPED
                 else:
                     raise
 
@@ -947,6 +968,7 @@ async def sync_media_group(
                     pass
 
     await asyncio.sleep(safe_delay)
+    return result
 
 
 def group_messages(messages):

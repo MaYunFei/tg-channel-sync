@@ -671,7 +671,7 @@ class SyncServiceTests(unittest.IsolatedAsyncioTestCase):
 
         with patch("sync_worker.realtime.public_poller.load_public_channel_new_messages", AsyncMock(return_value=messages)), \
              patch("sync_worker.clone.process.group_messages", return_value=[[messages[0]], [messages[1]]]), \
-             patch("sync_worker.clone.process.sync_single_message", AsyncMock()), \
+             patch("sync_worker.clone.process.sync_single_message", AsyncMock(return_value="sent_mapped")), \
              patch("sync_worker.realtime.public_poller.db.update_public_user_poll_position", AsyncMock()) as mock_update:
             await public_poller.process_public_channel_mapping_group(object(), object(), group)
 
@@ -691,6 +691,26 @@ class SyncServiceTests(unittest.IsolatedAsyncioTestCase):
         with patch("sync_worker.realtime.public_poller.load_public_channel_new_messages", AsyncMock(return_value=messages)), \
              patch("sync_worker.clone.process.group_messages", return_value=[[messages[0], messages[1]]]), \
              patch("sync_worker.clone.process.sync_media_group", AsyncMock(side_effect=[None, RuntimeError("send failed")])), \
+             patch("sync_worker.realtime.public_poller.db.update_public_user_poll_position", AsyncMock()) as mock_update:
+            with self.assertRaises(RuntimeError):
+                await public_poller.process_public_channel_mapping_group(object(), object(), group)
+
+        mock_update.assert_not_awaited()
+
+    async def test_public_poller_does_not_advance_checkpoint_when_sync_returns_failed(self):
+        from sync_worker.realtime import public_poller
+
+        message = type("Msg", (), {"id": 6})()
+        group = {
+            "source_id": -100123,
+            "source_ref": "source",
+            "last_polled_message_id": 5,
+            "mappings": [{"target_id": -100456}],
+        }
+
+        with patch("sync_worker.realtime.public_poller.load_public_channel_new_messages", AsyncMock(return_value=[message])), \
+             patch("sync_worker.clone.process.group_messages", return_value=[[message]]), \
+             patch("sync_worker.clone.process.sync_single_message", AsyncMock(return_value="failed")), \
              patch("sync_worker.realtime.public_poller.db.update_public_user_poll_position", AsyncMock()) as mock_update:
             with self.assertRaises(RuntimeError):
                 await public_poller.process_public_channel_mapping_group(object(), object(), group)

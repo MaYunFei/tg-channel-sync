@@ -58,6 +58,7 @@ JSON_TEXT_MESSAGE_LIMIT = 4096
 JSON_STANDARD_USER_UPLOAD_MAX_BYTES = 2000 * 1024 * 1024
 HTML_TOKEN_RE = re.compile(r"<[^>]+>|[^<]+")
 HTML_TAG_NAME_RE = re.compile(r"</?\s*([A-Za-z][A-Za-z0-9-]*)")
+JSON_GROUP_SENT_UNMAPPED = "sent_unmapped"
 
 
 def _pyro_file_ref(media_path: str) -> str:
@@ -398,7 +399,7 @@ async def _send_json_group_via_user(group, target_id, rewritten_captions, file_e
                 "JSON_TOPICS_COMPAT",
                 f"组首消息ID:{int(group[0].get('id') or 0)} | 辅助账号发送后返回 topics 解析异常，已停止重试避免重复发送",
             )
-            return []
+            return JSON_GROUP_SENT_UNMAPPED
         raise
 
 @dataclass
@@ -570,6 +571,12 @@ async def send_json_media_group(
 
         if sent_group is None:
             return None
+        if sent_group == JSON_GROUP_SENT_UNMAPPED:
+            await db.add_msg_log(
+                "JSON_GROUP_SEND_UNMAPPED",
+                f"组首消息ID:{first_id} | 共 {len(group)} 条 | 目标:[{target_id}] | 可能已发送，回包解析失败，未记录映射",
+            )
+            return JSON_GROUP_SENT_UNMAPPED
         for original_msg, sent_msg in zip(group, sent_group):
             new_id = _get_sent_message_id(sent_msg)
             sent_ids.append(new_id)

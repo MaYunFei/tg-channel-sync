@@ -88,6 +88,21 @@ class AppConfigTests(unittest.TestCase):
         self.assertEqual(config["sync"]["system_log_retention_limit"], 1000)
         self.assertEqual(config["sync"]["message_log_retention_limit"], 5000)
 
+    def test_float_config_invalid_values_fall_back_to_defaults(self):
+        config = app_config.save_config(
+            {
+                "sync": {
+                    "default_delay": "abc",
+                    "bot_upload_max_mb": "bad",
+                    "bot_rate_limit_gb": object(),
+                }
+            }
+        )
+
+        self.assertEqual(config["sync"]["default_delay"], 5)
+        self.assertEqual(config["sync"]["bot_upload_max_mb"], 50)
+        self.assertEqual(config["sync"]["bot_rate_limit_gb"], 10)
+
     def test_log_retention_values_are_clamped_to_minimum(self):
         config = app_config.save_config(
             {

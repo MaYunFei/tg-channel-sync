@@ -91,7 +91,10 @@ def _normalize_bool(value: Any, default: bool = False) -> bool:
 
 
 def _normalize_float(value: Any, default: float, *, minimum: float | None = None, maximum: float | None = None) -> float:
-    normalized = float(value or default)
+    try:
+        normalized = float(value if value is not None else default)
+    except (TypeError, ValueError):
+        normalized = float(default)
     if minimum is not None:
         normalized = max(minimum, normalized)
     if maximum is not None:

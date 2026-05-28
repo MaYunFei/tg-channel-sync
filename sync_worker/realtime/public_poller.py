@@ -5,6 +5,8 @@ import asyncio
 import database as db
 from app_config import get_config
 
+PROCESSED_SYNC_RESULTS = {"sent_mapped", "sent_unmapped", "skipped"}
+
 
 def public_channel_peer(source_ref: str):
     clean_ref = str(source_ref or "").strip()
@@ -74,12 +76,16 @@ async def process_public_channel_mapping_group(bot, user_app, group: dict):
                     "source_username_override": source_username_override,
                 }
                 if len(message_group) == 1:
-                    await sync_single_message(
+                    result = await sync_single_message(
                         "api", "user", user_app, bot, source_id, target_id, message_group[0], 0.5, False, **common_kwargs
                     )
                 else:
-                    await sync_media_group(
+                    result = await sync_media_group(
                         "api", "user", user_app, bot, source_id, target_id, message_group, 0.5, False, **common_kwargs
+                    )
+                if result not in PROCESSED_SYNC_RESULTS:
+                    raise RuntimeError(
+                        f"公开频道消息处理未完成: source={source_id} target={target_id} group_max_id={group_max_id} result={result}"
                     )
             completed_max_seen_id = max(completed_max_seen_id, group_max_id)
         if completed_max_seen_id > last_message_id:
