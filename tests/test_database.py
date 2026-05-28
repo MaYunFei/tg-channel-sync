@@ -25,6 +25,38 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         database.get_config = self.original_get_config
         self.temp_dir.cleanup()
 
+    async def test_apply_message_filters_drops_text_or_file_name_matches(self):
+        await database.init_db()
+        await database.add_filter_rule("drop", "blocked")
+        await database.add_filter_rule("skip_media", r"\.zip$")
+
+        should_skip_text, text = await database.apply_message_filters("blocked message", False, "safe.txt")
+        should_skip_file, _ = await database.apply_message_filters("allowed message", False, "archive.zip")
+
+        self.assertTrue(should_skip_text)
+        self.assertEqual(text, "blocked message")
+        self.assertTrue(should_skip_file)
+
+    async def test_apply_message_filters_replaces_text_in_rule_order(self):
+        await database.init_db()
+        await database.add_filter_rule("replace", "hello", "hi")
+        await database.add_filter_rule("replace_text", "hi world", "done")
+
+        should_skip, text = await database.apply_message_filters("hello world", False, "")
+
+        self.assertFalse(should_skip)
+        self.assertEqual(text, "done")
+
+    async def test_apply_message_filters_skips_invalid_regex_and_continues(self):
+        await database.init_db()
+        await database.add_filter_rule("drop", "[")
+        await database.add_filter_rule("replace", "hello", "hi")
+
+        should_skip, text = await database.apply_message_filters("hello", False, "")
+
+        self.assertFalse(should_skip)
+        self.assertEqual(text, "hi")
+
     async def test_init_db_migrates_old_tables(self):
         conn = sqlite3.connect(self.db_path)
         conn.execute("CREATE TABLE channel_mappings (id INTEGER PRIMARY KEY AUTOINCREMENT, source_id INTEGER NOT NULL UNIQUE, target_id INTEGER NOT NULL)")

@@ -100,6 +100,77 @@ def _download_actor_label(app) -> str:
     return bot_engine.describe_user_client(app, fallback="辅助账号")
 
 
+def _build_api_media_group_copy_kwargs(
+    target_id,
+    source_id,
+    group_first_id,
+    rewritten_captions,
+    captions_changed,
+    spoiler_flags,
+    group_has_spoiler,
+    reply_to_id,
+    quote_data,
+):
+    kwargs = _base_api_copy_kwargs(target_id, source_id, group_first_id)
+    if captions_changed or group_has_spoiler:
+        kwargs["parse_mode"] = ParseMode.HTML
+        if captions_changed:
+            kwargs["captions"] = _api_group_captions(rewritten_captions)
+        if group_has_spoiler:
+            kwargs["has_spoilers"] = spoiler_flags
+    _add_reply_kwargs(kwargs, reply_to_id)
+    _add_quote_kwargs(kwargs, quote_data, reply_to_id)
+    return kwargs
+
+
+def _clone_media_group_items(downloaded_files, mode):
+    return [(item, path, get_msg_meta(item, mode)[0]) for item, path in downloaded_files]
+
+
+def _build_clone_media_group_send_kwargs(
+    actual_sender,
+    target_id,
+    group_items,
+    rewritten_captions,
+    thumbnail_paths,
+    spoiler_flags,
+    upload_label,
+    total_bytes,
+    reply_to_id,
+    quote_data,
+    item_count,
+    client,
+):
+    if actual_sender == "bot":
+        tracker, media_list = build_bot_media_group(group_items, rewritten_captions, thumbnail_paths, total_bytes, upload_label, spoiler_flags)
+    else:
+        tracker = UploadProgressTracker(f"上传媒体组 [{upload_label}]", total_bytes)
+        media_list = build_user_media_group(group_items, rewritten_captions, thumbnail_paths, spoiler_flags)
+    send_kwargs = {"chat_id": target_id, "media": media_list}
+    if reply_to_id:
+        send_kwargs["reply_to_message_id"] = reply_to_id
+    if quote_data and reply_to_id:
+        if actual_sender == "bot":
+            send_kwargs.pop("reply_to_message_id", None)
+            send_kwargs["reply_parameters"] = ReplyParameters(
+                message_id=reply_to_id,
+                quote=quote_data["text"],
+                quote_position=quote_data.get("position"),
+            )
+        else:
+            send_kwargs["quote_text"] = quote_data["text"]
+            if quote_data.get("entities"):
+                send_kwargs["quote_entities"] = quote_data["entities"]
+    if actual_sender != "bot":
+        send_kwargs["progress"] = build_pyro_progress_callback(
+            tracker,
+            f"上传媒体组: {item_count} 项",
+            total_bytes=total_bytes,
+            client=client,
+        )
+    return send_kwargs
+
+
 async def _download_clone_media_item(
     app,
     msg,
@@ -569,31 +640,23 @@ async def sync_media_group(
             if sync_state["stop_requested"]:
                 break
             try:
-                if captions_changed or group_has_spoiler:
-                    kwargs = _base_api_copy_kwargs(target_id, source_id, group[0].id)
-                    kwargs["parse_mode"] = ParseMode.HTML
-                    if captions_changed:
-                        kwargs["captions"] = _api_group_captions(rewritten_captions)
-                    if group_has_spoiler:
-                        kwargs["has_spoilers"] = spoiler_flags
-                    _add_reply_kwargs(kwargs, reply_to_id)
-                    _add_quote_kwargs(kwargs, quote_data, reply_to_id)
-                    copied_msgs = await execute_with_network_retry(
-                        lambda: app.copy_media_group(**kwargs),
-                        action_label=f"API 媒体组复制 {group[0].id}",
-                        sync_state=sync_state,
-                        log_tag="SYNC_NETWORK_RETRY",
-                    )
-                else:
-                    kwargs = _base_api_copy_kwargs(target_id, source_id, group[0].id)
-                    _add_reply_kwargs(kwargs, reply_to_id)
-                    _add_quote_kwargs(kwargs, quote_data, reply_to_id)
-                    copied_msgs = await execute_with_network_retry(
-                        lambda: app.copy_media_group(**kwargs),
-                        action_label=f"API 媒体组复制 {group[0].id}",
-                        sync_state=sync_state,
-                        log_tag="SYNC_NETWORK_RETRY",
-                    )
+                kwargs = _build_api_media_group_copy_kwargs(
+                    target_id,
+                    source_id,
+                    group[0].id,
+                    rewritten_captions,
+                    captions_changed,
+                    spoiler_flags,
+                    group_has_spoiler,
+                    reply_to_id,
+                    quote_data,
+                )
+                copied_msgs = await execute_with_network_retry(
+                    lambda: app.copy_media_group(**kwargs),
+                    action_label=f"API 媒体组复制 {group[0].id}",
+                    sync_state=sync_state,
+                    log_tag="SYNC_NETWORK_RETRY",
+                )
                 for orig_m, new_m in zip(group, copied_msgs):
                     await record_success(source_id, target_id, orig_m.id, new_m.id, force_send=force_send)
                 if captions_changed:
@@ -603,8 +666,6 @@ async def sync_media_group(
                 break
             except TypeError as exc:
                 if "topics" in str(exc):
-                    for item in group:
-                        await record_success(source_id, target_id, item.id, 0, force_send=force_send)
                     break
             except Exception as exc:
                 if "STOP_REQUESTED" in str(exc):
@@ -736,34 +797,21 @@ async def sync_media_group(
             if sync_state["stop_requested"]:
                 break
             try:
-                group_items = [(item, path, get_msg_meta(item, mode)[0]) for item, path in downloaded_files]
-                if actual_sender == "bot":
-                    tracker, media_list = build_bot_media_group(group_items, rewritten_captions, thumbnail_paths, sum(file_sizes), upload_target["label"], spoiler_flags)
-                else:
-                    tracker = UploadProgressTracker(f"上传媒体组 [{upload_target['label']}]", sum(file_sizes))
-                    media_list = build_user_media_group(group_items, rewritten_captions, thumbnail_paths, spoiler_flags)
-                send_kwargs = {"chat_id": target_id, "media": media_list}
-                if reply_to_id:
-                    send_kwargs["reply_to_message_id"] = reply_to_id
-                if quote_data and reply_to_id:
-                    if actual_sender == "bot":
-                        send_kwargs.pop("reply_to_message_id", None)
-                        send_kwargs["reply_parameters"] = ReplyParameters(
-                            message_id=reply_to_id,
-                            quote=quote_data["text"],
-                            quote_position=quote_data.get("position"),
-                        )
-                    else:
-                        send_kwargs["quote_text"] = quote_data["text"]
-                        if quote_data.get("entities"):
-                            send_kwargs["quote_entities"] = quote_data["entities"]
-                if actual_sender != "bot":
-                    send_kwargs["progress"] = build_pyro_progress_callback(
-                        tracker,
-                        f"上传媒体组: {len(downloaded_files)} 项",
-                        total_bytes=sum(file_sizes),
-                        client=client,
-                    )
+                group_items = _clone_media_group_items(downloaded_files, mode)
+                send_kwargs = _build_clone_media_group_send_kwargs(
+                    actual_sender,
+                    target_id,
+                    group_items,
+                    rewritten_captions,
+                    thumbnail_paths,
+                    spoiler_flags,
+                    upload_target["label"],
+                    sum(file_sizes),
+                    reply_to_id,
+                    quote_data,
+                    len(downloaded_files),
+                    client,
+                )
                 sent_msgs = await _execute_with_clone_retry_interruptibly(
                     lambda: client.send_media_group(**send_kwargs),
                     action_label=f"媒体组 {group[0].id}",
@@ -789,8 +837,6 @@ async def sync_media_group(
                 if isinstance(exc, SyncNetworkRetryExhaustedError):
                     raise
                 if actual_sender != "bot" and _is_topics_parse_error(exc):
-                    for orig_m in group:
-                        await record_success(source_id, target_id, orig_m.id, 0, force_send=force_send)
                     await db.add_msg_log(
                         "CLONE_TOPICS_COMPAT",
                         f"原始:[{source_id}] 组首ID:{group[0].id} | 辅助账号发送后返回 topics 解析异常，已停止重试避免重复发送",
@@ -848,7 +894,7 @@ async def sync_media_group(
             fallback_reason = "Bot 上传体积超限，改用辅助账号重传" if bot_size_limit_hit else f"{upload_target['label']} 上传失败，改用辅助账号重传"
             await db.add_msg_log("BOT_FALLBACK", f"原始:[{source_id}] 组首ID:{first_id} | {fallback_reason}")
             tracker = UploadProgressTracker("上传媒体组 [改用辅助账号]", sum(file_sizes))
-            group_items = [(item, path, get_msg_meta(item, mode)[0]) for item, path in downloaded_files]
+            group_items = _clone_media_group_items(downloaded_files, mode)
             media_list = build_user_media_group(group_items, rewritten_captions, thumbnail_paths, spoiler_flags)
             send_kwargs = {"chat_id": target_id, "media": media_list}
             if reply_to_id:
@@ -877,8 +923,6 @@ async def sync_media_group(
                 )
             except Exception as exc:
                 if _is_topics_parse_error(exc):
-                    for orig_m in group:
-                        await record_success(source_id, target_id, orig_m.id, 0, force_send=force_send)
                     await db.add_msg_log(
                         "CLONE_TOPICS_COMPAT",
                         f"原始:[{source_id}] 组首ID:{first_id} | 改用辅助账号发送后返回 topics 解析异常，已停止重试避免重复发送",

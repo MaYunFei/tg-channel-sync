@@ -609,21 +609,34 @@ async def delete_filter_rule(rule_id: int):
     await _execute("DELETE FROM filter_rules WHERE id = ?", (rule_id,), commit=True)
 
 
+def _compile_filter_regex(pattern: str, is_case_sensitive: int):
+    flags = 0 if is_case_sensitive else re.IGNORECASE
+    return re.compile(pattern, flags)
+
+
+def _filter_rule_should_drop(regex, text: str, file_name: str) -> bool:
+    return bool(regex.search(text) or (file_name and regex.search(file_name)))
+
+
+def _apply_filter_rule(rule_type: str, regex, replacement: str, text: str, file_name: str) -> tuple[bool, str]:
+    if rule_type in ["drop", "skip_media"]:
+        return _filter_rule_should_drop(regex, text, file_name), text
+    if rule_type in ["replace", "replace_text"] and text:
+        return False, regex.sub(replacement or "", text)
+    return False, text
+
+
 async def apply_message_filters(text_html: str, has_media: bool, file_name: str) -> tuple[bool, str]:
     del has_media
     rules = await get_all_filter_rules()
     should_skip = False
     new_text = text_html or ""
     for _, rule_type, pattern, replacement, is_case_sensitive in rules:
-        flags = 0 if is_case_sensitive else re.IGNORECASE
         try:
-            regex = re.compile(pattern, flags)
-            if rule_type in ["drop", "skip_media"]:
-                if regex.search(new_text) or (file_name and regex.search(file_name)):
-                    should_skip = True
-                    break
-            elif rule_type in ["replace", "replace_text"] and new_text:
-                new_text = regex.sub(replacement or "", new_text)
+            regex = _compile_filter_regex(pattern, is_case_sensitive)
+            should_skip, new_text = _apply_filter_rule(rule_type, regex, replacement, new_text, file_name)
+            if should_skip:
+                break
         except re.error:
             continue
     return should_skip, new_text

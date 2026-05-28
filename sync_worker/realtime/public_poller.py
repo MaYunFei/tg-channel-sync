@@ -59,12 +59,12 @@ async def process_public_channel_mapping_group(bot, user_app, group: dict):
     source_username_override = "" if source_ref.lstrip("-").isdigit() else source_ref
     previous_mode = sync_state.get("mode", "")
     sync_state["mode"] = "PUBLIC"
-    max_seen_id = last_message_id
+    completed_max_seen_id = last_message_id
     try:
         for message_group in group_messages(messages):
             if sync_state.get("is_syncing") or not message_group:
                 return
-            max_seen_id = max(max_seen_id, *(int(getattr(item, "id", 0) or 0) for item in message_group))
+            group_max_id = max(int(getattr(item, "id", 0) or 0) for item in message_group)
             for target_mapping in group["mappings"]:
                 target_id = int(target_mapping["target_id"])
                 common_kwargs = {
@@ -81,7 +81,9 @@ async def process_public_channel_mapping_group(bot, user_app, group: dict):
                     await sync_media_group(
                         "api", "user", user_app, bot, source_id, target_id, message_group, 0.5, False, **common_kwargs
                     )
-        await db.update_public_user_poll_position(source_id, source_ref, max_seen_id)
+            completed_max_seen_id = max(completed_max_seen_id, group_max_id)
+        if completed_max_seen_id > last_message_id:
+            await db.update_public_user_poll_position(source_id, source_ref, completed_max_seen_id)
     finally:
         sync_state["mode"] = previous_mode
 

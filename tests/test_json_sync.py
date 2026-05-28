@@ -564,11 +564,40 @@ class JsonSyncTests(unittest.IsolatedAsyncioTestCase):
                 await json_sync.send_json_media_group(group, -100456, temp_dir, 0, False, {}, "bot", True)
 
             self.assertEqual(mock_send.await_count, 1)
-            self.assertEqual(mock_record_success.await_count, 2)
+            mock_record_success.assert_not_awaited()
             self.assertIn(
                 ("JSON_TOPICS_COMPAT", "组首消息ID:1 | 辅助账号发送后返回 topics 解析异常，已停止重试避免重复发送"),
                 [call.args for call in mock_add_msg_log.await_args_list],
             )
+
+    async def test_send_json_media_group_cleans_temp_file_when_prepare_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            photos_dir = Path(temp_dir) / "photos"
+            photos_dir.mkdir()
+            for name in ["a.jpg", "b.jpg"]:
+                (photos_dir / name).write_bytes(b"jpg")
+            temp_media = Path(temp_dir) / "prepared.tmp"
+
+            group = [
+                {"id": 1, "type": "message", "date_unixtime": "1", "photo": "photos/a.jpg", "text": ""},
+                {"id": 2, "type": "message", "date_unixtime": "2", "photo": "photos/b.jpg", "text": ""},
+            ]
+
+            async def prepare(media_path, _media_type, item_id, _hash_perturb):
+                if item_id == 1:
+                    temp_media.write_bytes(b"temp")
+                    return str(temp_media), True
+                raise RuntimeError("prepare failed")
+
+            with patch("sync_worker.json_import.process.update_state_and_check_skip", AsyncMock(return_value=False)), \
+                 patch("sync_worker.json_import.process.rewrite_message_links", AsyncMock(side_effect=lambda text, *_: (text, 0))), \
+                 patch("sync_worker.json_import.process._prepare_json_media_path", AsyncMock(side_effect=prepare)), \
+                 patch("sync_worker.json_import.process.record_success", AsyncMock()) as mock_record_success:
+                with self.assertRaises(RuntimeError):
+                    await json_sync.send_json_media_group(group, -100456, temp_dir, 0, False, {}, "bot", True)
+
+            self.assertFalse(temp_media.exists())
+            mock_record_success.assert_not_awaited()
 
     async def test_process_json_sync_respects_type_filter(self):
         with tempfile.TemporaryDirectory() as temp_dir:

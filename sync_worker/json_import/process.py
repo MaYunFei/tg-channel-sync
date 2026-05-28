@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 import json
 import os
 import re
@@ -355,20 +356,23 @@ async def _send_json_text_via_user(target_id, text, reply_to_id):
     return await _send_json_text_parts_via_user(target_id, _split_json_text_for_send(text), reply_to_id)
 
 
+def _json_media_group_items(file_entries, rewritten_captions):
+    normalized_captions = []
+    group_items = []
+    for (item, media_path, media_type), caption_html in zip(file_entries, rewritten_captions):
+        normalized_captions.append(caption_html if caption_html else None)
+        group_items.append((item, media_path, "video" if media_type == "animation" else media_type))
+    return group_items, normalized_captions
+
+
 async def _send_json_group_via_user(group, target_id, rewritten_captions, file_entries, reply_to_id):
     app = bot_engine.pyro_user_app
     if not getattr(app, "is_initialized", False):
         raise JsonSyncFatalError("Bot 上传体积超限，且辅助账号未登录，无法回退发送媒体组")
     total_bytes = sum(os.path.getsize(path) for _, path, _ in file_entries)
     tracker = SharedUploadProgressTracker("上传媒体组 [改用辅助账号]", total_bytes)
-    normalized_captions = []
-    group_items = []
-    spoiler_flags = []
-    for index, ((item, media_path, media_type), caption_html) in enumerate(zip(file_entries, rewritten_captions), start=1):
-        caption = caption_html if caption_html else None
-        normalized_captions.append(caption)
-        group_items.append((item, media_path, "video" if media_type == "animation" else media_type))
-        spoiler_flags.append(has_media_spoiler(item, media_type, "json"))
+    group_items, normalized_captions = _json_media_group_items(file_entries, rewritten_captions)
+    spoiler_flags = [has_media_spoiler(item, media_type, "json") for item, _, media_type in file_entries]
     media = build_user_media_group(group_items, normalized_captions, {}, spoiler_flags)
     kwargs = {"chat_id": target_id, "media": media}
     if reply_to_id:
@@ -394,36 +398,25 @@ async def _send_json_group_via_user(group, target_id, rewritten_captions, file_e
                 "JSON_TOPICS_COMPAT",
                 f"组首消息ID:{int(group[0].get('id') or 0)} | 辅助账号发送后返回 topics 解析异常，已停止重试避免重复发送",
             )
-            return [type("PyroSentFallback", (), {"id": 0})() for _ in group]
+            return []
         raise
 
-async def send_json_media_group(
-    group,
-    target_id,
-    json_dir,
-    source_scope_id,
-    force_send,
-    link_context,
-    sender: str,
-    clone_fallback_to_user: bool,
-    hash_perturb: bool = False,
-    include_external_source_header: bool = False,
-):
-    group_ids = [int(item.get("id") or 0) for item in group]
+@dataclass
+class _JsonMediaGroupPreparation:
+    file_entries: list[tuple[dict, str, str]]
+    spoiler_flags: list[bool]
+    prepared_temp_paths: list[str]
+    rewritten_captions: list[str]
+    total_bytes: int
+
+
+async def _prepare_json_media_group(group, json_dir, source_scope_id, link_context, hash_perturb, include_external_source_header, prepared_temp_paths):
     first_msg = group[0]
-    first_id = group_ids[0] if group_ids else 0
-    if await update_state_and_check_skip(source_scope_id, target_id, first_id, "[JSON媒体组]", force_send=force_send):
-        return
-
-    media_list = []
-    sent_ids = []
-    rewritten_captions = []
-    total_bytes = 0
     group_family = _json_group_family(first_msg)
-
     file_entries = []
     spoiler_flags = []
-    prepared_temp_paths = []
+    rewritten_captions = []
+    total_bytes = 0
     raw_captions = [build_json_text(item, include_external_source_header=False) for item in group]
     visual_header_index = None
     if group_family == "visual" and include_external_source_header:
@@ -454,99 +447,134 @@ async def send_json_media_group(
             await db.add_msg_log("JSON_LINK_REWRITE", f"消息ID:{item_id} | 命中 {rewrite_count} 个链接改写")
         rewritten_captions.append(caption_html)
 
-    reply_to_id = await resolve_reply_target(
-        source_scope_id,
-        target_id,
-        get_reply_source_msg_id(first_msg, "json"),
-        "JSON",
-        first_id,
-    )
-    file_sizes = [os.path.getsize(path) for _, path, _ in file_entries]
-    upload_target = await _select_json_upload_target(
-        sender,
-        file_sizes,
-        clone_fallback_to_user=clone_fallback_to_user,
-        wait_for_available_bot=not _json_should_fallback_to_user(sender, clone_fallback_to_user),
-    )
-    sent_group = None
+    return _JsonMediaGroupPreparation(file_entries, spoiler_flags, prepared_temp_paths, rewritten_captions, total_bytes)
 
-    if upload_target["sender"] == "user":
-        sent_group = await _send_json_group_via_user(group, target_id, rewritten_captions, file_entries, reply_to_id)
-    else:
-        for _ in range(3):
-            if sync_state["stop_requested"]:
-                break
-            normalized_captions = []
-            group_items = []
-            for index, (item, media_path, media_type) in enumerate(file_entries):
-                caption_html = rewritten_captions[index]
-                caption = caption_html if caption_html else None
-                normalized_captions.append(caption)
-                group_items.append((item, media_path, "video" if media_type == "animation" else media_type))
-            tracker, media_list = build_bot_media_group(group_items, normalized_captions, {}, total_bytes, upload_target["label"], spoiler_flags)
-            try:
-                sent_group = await execute_with_network_retry(
-                    lambda: upload_target["client"].send_media_group(
-                        target_id,
-                        media_list,
-                        reply_to_message_id=reply_to_id,
-                    ),
-                    action_label=f"JSON 媒体组发送 {first_id}",
-                    sync_state=sync_state,
-                    log_tag="JSON_NETWORK_RETRY",
-                )
-                await bot_engine.note_upload_success(upload_target["client"], sum(file_sizes))
-                break
-            except Exception as exc:
-                if sync_state["stop_requested"]:
-                    raise
-                if isinstance(exc, SyncNetworkRetryExhaustedError):
-                    raise
-                if _is_request_entity_too_large(exc):
-                    if _json_should_fallback_to_user(sender, clone_fallback_to_user):
-                        await db.add_msg_log("JSON_FALLBACK", f"组首消息ID:{first_id} | Bot 上传体积超限，已改用辅助账号发送媒体组")
-                        sent_group = await _send_json_group_via_user(group, target_id, rewritten_captions, file_entries, reply_to_id)
-                        break
-                    raise
-                retry_after = _parse_retry_after_seconds(exc)
-                if retry_after is not None:
-                    await bot_engine.mark_upload_bot_cooldown(upload_target["client"], retry_after + 1, f"JSON 媒体组首ID:{first_id}")
-                    upload_target = await _select_json_upload_target(
-                        sender,
-                        file_sizes,
-                        clone_fallback_to_user=clone_fallback_to_user,
-                        wait_for_available_bot=not _json_should_fallback_to_user(sender, clone_fallback_to_user),
-                    )
-                    if upload_target["sender"] == "user":
-                        await db.add_msg_log("JSON_FALLBACK", f"组首消息ID:{first_id} | Bot 频控，已切换辅助账号发送媒体组")
-                        sent_group = await _send_json_group_via_user(group, target_id, rewritten_captions, file_entries, reply_to_id)
-                        break
-                    continue
-                if bot_engine.should_disable_upload_bot_for_error(exc):
-                    await bot_engine.disable_upload_bot(upload_target["client"], str(exc))
-                    upload_target = await _select_json_upload_target(
-                        sender,
-                        file_sizes,
-                        clone_fallback_to_user=clone_fallback_to_user,
-                        wait_for_available_bot=not _json_should_fallback_to_user(sender, clone_fallback_to_user),
-                    )
-                    if upload_target["sender"] == "user":
-                        await db.add_msg_log("JSON_FALLBACK", f"组首消息ID:{first_id} | 当前 Bot 已失效，已切换辅助账号发送媒体组")
-                        sent_group = await _send_json_group_via_user(group, target_id, rewritten_captions, file_entries, reply_to_id)
-                        break
-                    continue
-                raise
-        if sent_group is None and not sync_state["stop_requested"] and _json_should_fallback_to_user(sender, clone_fallback_to_user):
-            await db.add_msg_log("JSON_FALLBACK", f"组首消息ID:{first_id} | Bot 发送失败，已改用辅助账号发送媒体组")
-            sent_group = await _send_json_group_via_user(group, target_id, rewritten_captions, file_entries, reply_to_id)
+async def send_json_media_group(
+    group,
+    target_id,
+    json_dir,
+    source_scope_id,
+    force_send,
+    link_context,
+    sender: str,
+    clone_fallback_to_user: bool,
+    hash_perturb: bool = False,
+    include_external_source_header: bool = False,
+):
+    group_ids = [int(item.get("id") or 0) for item in group]
+    first_msg = group[0]
+    first_id = group_ids[0] if group_ids else 0
+    if await update_state_and_check_skip(source_scope_id, target_id, first_id, "[JSON媒体组]", force_send=force_send):
+        return
+
+    sent_ids = []
+    prepared_temp_paths = []
 
     try:
+        preparation = await _prepare_json_media_group(
+            group,
+            json_dir,
+            source_scope_id,
+            link_context,
+            hash_perturb,
+            include_external_source_header,
+            prepared_temp_paths,
+        )
+        if preparation is None:
+            return None
+        file_entries = preparation.file_entries
+        spoiler_flags = preparation.spoiler_flags
+        prepared_temp_paths = preparation.prepared_temp_paths
+        rewritten_captions = preparation.rewritten_captions
+        total_bytes = preparation.total_bytes
+
+        reply_to_id = await resolve_reply_target(
+            source_scope_id,
+            target_id,
+            get_reply_source_msg_id(first_msg, "json"),
+            "JSON",
+            first_id,
+        )
+        file_sizes = [os.path.getsize(path) for _, path, _ in file_entries]
+        upload_target = await _select_json_upload_target(
+            sender,
+            file_sizes,
+            clone_fallback_to_user=clone_fallback_to_user,
+            wait_for_available_bot=not _json_should_fallback_to_user(sender, clone_fallback_to_user),
+        )
+        sent_group = None
+
+        if upload_target["sender"] == "user":
+            sent_group = await _send_json_group_via_user(group, target_id, rewritten_captions, file_entries, reply_to_id)
+        else:
+            for _ in range(3):
+                if sync_state["stop_requested"]:
+                    break
+                group_items, normalized_captions = _json_media_group_items(file_entries, rewritten_captions)
+                tracker, media_list = build_bot_media_group(group_items, normalized_captions, {}, total_bytes, upload_target["label"], spoiler_flags)
+                try:
+                    sent_group = await execute_with_network_retry(
+                        lambda: upload_target["client"].send_media_group(
+                            target_id,
+                            media_list,
+                            reply_to_message_id=reply_to_id,
+                        ),
+                        action_label=f"JSON 媒体组发送 {first_id}",
+                        sync_state=sync_state,
+                        log_tag="JSON_NETWORK_RETRY",
+                    )
+                    await bot_engine.note_upload_success(upload_target["client"], sum(file_sizes))
+                    break
+                except Exception as exc:
+                    if sync_state["stop_requested"]:
+                        raise
+                    if isinstance(exc, SyncNetworkRetryExhaustedError):
+                        raise
+                    if _is_request_entity_too_large(exc):
+                        if _json_should_fallback_to_user(sender, clone_fallback_to_user):
+                            await db.add_msg_log("JSON_FALLBACK", f"组首消息ID:{first_id} | Bot 上传体积超限，已改用辅助账号发送媒体组")
+                            sent_group = await _send_json_group_via_user(group, target_id, rewritten_captions, file_entries, reply_to_id)
+                            break
+                        raise
+                    retry_after = _parse_retry_after_seconds(exc)
+                    if retry_after is not None:
+                        await bot_engine.mark_upload_bot_cooldown(upload_target["client"], retry_after + 1, f"JSON 媒体组首ID:{first_id}")
+                        upload_target = await _select_json_upload_target(
+                            sender,
+                            file_sizes,
+                            clone_fallback_to_user=clone_fallback_to_user,
+                            wait_for_available_bot=not _json_should_fallback_to_user(sender, clone_fallback_to_user),
+                        )
+                        if upload_target["sender"] == "user":
+                            await db.add_msg_log("JSON_FALLBACK", f"组首消息ID:{first_id} | Bot 频控，已切换辅助账号发送媒体组")
+                            sent_group = await _send_json_group_via_user(group, target_id, rewritten_captions, file_entries, reply_to_id)
+                            break
+                        continue
+                    if bot_engine.should_disable_upload_bot_for_error(exc):
+                        await bot_engine.disable_upload_bot(upload_target["client"], str(exc))
+                        upload_target = await _select_json_upload_target(
+                            sender,
+                            file_sizes,
+                            clone_fallback_to_user=clone_fallback_to_user,
+                            wait_for_available_bot=not _json_should_fallback_to_user(sender, clone_fallback_to_user),
+                        )
+                        if upload_target["sender"] == "user":
+                            await db.add_msg_log("JSON_FALLBACK", f"组首消息ID:{first_id} | 当前 Bot 已失效，已切换辅助账号发送媒体组")
+                            sent_group = await _send_json_group_via_user(group, target_id, rewritten_captions, file_entries, reply_to_id)
+                            break
+                        continue
+                    raise
+            if sent_group is None and not sync_state["stop_requested"] and _json_should_fallback_to_user(sender, clone_fallback_to_user):
+                await db.add_msg_log("JSON_FALLBACK", f"组首消息ID:{first_id} | Bot 发送失败，已改用辅助账号发送媒体组")
+                sent_group = await _send_json_group_via_user(group, target_id, rewritten_captions, file_entries, reply_to_id)
+
         if sent_group is None:
             return None
         for original_msg, sent_msg in zip(group, sent_group):
             new_id = _get_sent_message_id(sent_msg)
             sent_ids.append(new_id)
-            await record_success(source_scope_id, target_id, int(original_msg.get("id") or 0), new_id, force_send=force_send)
+            if new_id > 0:
+                await record_success(source_scope_id, target_id, int(original_msg.get("id") or 0), new_id, force_send=force_send)
 
         await db.add_msg_log(
             "JSON_GROUP_SEND",

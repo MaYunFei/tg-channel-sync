@@ -95,6 +95,24 @@ class SyncServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rewritten, "https://t.me/c/3717669322/301")
         self.assertEqual(count, 1)
 
+    async def test_rewrite_message_links_counts_each_duplicate_position(self):
+        context = {"target_id": -100456, "source_username": "source", "target_username": "target"}
+
+        async def map_message_id(source_id, source_msg_id, target_id):
+            self.assertEqual(source_id, -100123)
+            self.assertEqual(target_id, -100456)
+            return {12: 88, 13: None}[source_msg_id]
+
+        with patch("services.sync_services.db.get_target_msg_id", AsyncMock(side_effect=map_message_id)):
+            rewritten, count = await sync_services.rewrite_message_links(
+                "https://t.me/source/12 https://t.me/source/12 https://t.me/source/13",
+                -100123,
+                context,
+            )
+
+        self.assertEqual(rewritten, "https://t.me/target/88 https://t.me/target/88 https://t.me/source/13")
+        self.assertEqual(count, 2)
+
     def test_prepend_source_header_html_supports_pyrogram_like_message(self):
         msg = type(
             "Msg",
@@ -317,6 +335,35 @@ class SyncServiceTests(unittest.IsolatedAsyncioTestCase):
 
             mock_download.assert_awaited()
             mock_record_success.assert_awaited_once_with(-100123, -100456, 7, 101, force_send=False)
+
+    async def test_sync_media_group_api_topics_error_does_not_record_zero_mapping(self):
+        group = [
+            type("Msg", (), {"id": 1, "text": None, "caption": None})(),
+            type("Msg", (), {"id": 2, "text": None, "caption": None})(),
+        ]
+        fake_app = type("FakeApp", (), {"copy_media_group": AsyncMock(side_effect=TypeError("Messages.__init__() missing 1 required keyword-only argument: 'topics'"))})()
+
+        with patch("sync_worker.clone.process.update_state_and_check_skip", AsyncMock(return_value=False)), \
+             patch("sync_worker.clone.process.resolve_reply_target", AsyncMock(return_value=None)), \
+             patch("sync_worker.clone.process.build_link_rewrite_context", AsyncMock(return_value={})), \
+             patch("sync_worker.clone.process.rewrite_media_group_captions", AsyncMock(return_value=(["", ""], False, 0))), \
+             patch("sync_worker.clone.process.get_msg_meta", return_value=("photo", "sync_photo")), \
+             patch("sync_worker.clone.process.has_media_spoiler", return_value=False), \
+             patch("sync_worker.clone.process.execute_with_network_retry", AsyncMock(side_effect=TypeError("Messages.__init__() missing 1 required keyword-only argument: 'topics'"))), \
+             patch("sync_worker.clone.process.record_success", AsyncMock()) as mock_record_success:
+            await history.sync_media_group(
+                "api",
+                "bot",
+                fake_app,
+                object(),
+                -100123,
+                -100456,
+                group,
+                0,
+                False,
+            )
+
+        mock_record_success.assert_not_awaited()
 
     async def test_download_clone_media_item_uses_normal_download(self):
         fake_app = type("FakeApp", (), {"download_media": AsyncMock(return_value="normal.bin")})()
@@ -610,6 +657,45 @@ class SyncServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bot_engine._public_channel_peer("@source"), "@source")
         self.assertEqual(bot_engine._public_channel_peer("source"), "@source")
         self.assertEqual(bot_engine._public_channel_peer("-100123"), -100123)
+
+    async def test_public_poller_advances_checkpoint_after_completed_groups(self):
+        from sync_worker.realtime import public_poller
+
+        messages = [type("Msg", (), {"id": 6})(), type("Msg", (), {"id": 7})()]
+        group = {
+            "source_id": -100123,
+            "source_ref": "source",
+            "last_polled_message_id": 5,
+            "mappings": [{"target_id": -100456}, {"target_id": -100789}],
+        }
+
+        with patch("sync_worker.realtime.public_poller.load_public_channel_new_messages", AsyncMock(return_value=messages)), \
+             patch("sync_worker.clone.process.group_messages", return_value=[[messages[0]], [messages[1]]]), \
+             patch("sync_worker.clone.process.sync_single_message", AsyncMock()), \
+             patch("sync_worker.realtime.public_poller.db.update_public_user_poll_position", AsyncMock()) as mock_update:
+            await public_poller.process_public_channel_mapping_group(object(), object(), group)
+
+        mock_update.assert_awaited_once_with(-100123, "source", 7)
+
+    async def test_public_poller_does_not_advance_checkpoint_for_failed_group(self):
+        from sync_worker.realtime import public_poller
+
+        messages = [type("Msg", (), {"id": 6})(), type("Msg", (), {"id": 7})()]
+        group = {
+            "source_id": -100123,
+            "source_ref": "source",
+            "last_polled_message_id": 5,
+            "mappings": [{"target_id": -100456}, {"target_id": -100789}],
+        }
+
+        with patch("sync_worker.realtime.public_poller.load_public_channel_new_messages", AsyncMock(return_value=messages)), \
+             patch("sync_worker.clone.process.group_messages", return_value=[[messages[0], messages[1]]]), \
+             patch("sync_worker.clone.process.sync_media_group", AsyncMock(side_effect=[None, RuntimeError("send failed")])), \
+             patch("sync_worker.realtime.public_poller.db.update_public_user_poll_position", AsyncMock()) as mock_update:
+            with self.assertRaises(RuntimeError):
+                await public_poller.process_public_channel_mapping_group(object(), object(), group)
+
+        mock_update.assert_not_awaited()
 
     async def test_mapping_source_numeric_id_falls_back_when_bot_cannot_receive(self):
         from services import channel_mapping_sources

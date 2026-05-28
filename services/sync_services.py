@@ -183,17 +183,23 @@ async def rewrite_message_links(text_html, source_id, link_context):
 
     async def replace_pattern(pattern, target_channel_ref):
         nonlocal updated_html, rewrite_count
-        for match in list(pattern.finditer(updated_html)):
+        parts = []
+        cursor = 0
+        changed = False
+        for match in pattern.finditer(updated_html):
             source_msg_id = int(match.group("msg_id"))
             target_msg_id = await db.get_target_msg_id(source_id, source_msg_id, link_context["target_id"])
-            if not target_msg_id:
-                continue
             original = match.group(0)
-            replaced = _replace_msg_link(match, target_channel_ref, target_msg_id)
-            if original == replaced:
-                continue
-            updated_html = updated_html.replace(original, replaced)
-            rewrite_count += 1
+            replaced = _replace_msg_link(match, target_channel_ref, target_msg_id) if target_msg_id else original
+            parts.append(updated_html[cursor:match.start()])
+            parts.append(replaced)
+            cursor = match.end()
+            if original != replaced:
+                rewrite_count += 1
+                changed = True
+        if changed:
+            parts.append(updated_html[cursor:])
+            updated_html = "".join(parts)
 
     if source_id != 0 and has_internal_channel_id(source_id):
         source_internal_id = str(abs(source_id)).removeprefix("100")

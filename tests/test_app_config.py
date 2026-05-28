@@ -58,6 +58,23 @@ class AppConfigTests(unittest.TestCase):
 
         self.assertTrue(config["app"]["debug_terminal_logs"])
 
+    def test_string_boolean_values_parse_common_literals(self):
+        config = app_config.save_config(
+            {
+                "proxy": {"enabled": "false"},
+                "server": {"auto_open_browser": "0"},
+                "sync": {"force_send": "no", "realtime_fallback_to_user": ""},
+                "app": {"portable_mode": "off", "debug_terminal_logs": "true"},
+            }
+        )
+
+        self.assertFalse(config["proxy"]["enabled"])
+        self.assertFalse(config["server"]["auto_open_browser"])
+        self.assertFalse(config["sync"]["force_send"])
+        self.assertTrue(config["sync"]["realtime_fallback_to_user"])
+        self.assertFalse(config["app"]["portable_mode"])
+        self.assertTrue(config["app"]["debug_terminal_logs"])
+
     def test_log_retention_invalid_values_fall_back_to_defaults(self):
         config = app_config.save_config(
             {

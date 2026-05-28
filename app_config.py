@@ -74,6 +74,39 @@ def _normalize_int(value: Any, default: int, *, minimum: int | None = None, maxi
     return normalized
 
 
+def _normalize_str(value: Any, default: str = "") -> str:
+    return str(value or default).strip()
+
+
+def _normalize_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if not normalized:
+            return bool(default)
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+    return bool(value if value is not None else default)
+
+
+def _normalize_float(value: Any, default: float, *, minimum: float | None = None, maximum: float | None = None) -> float:
+    normalized = float(value or default)
+    if minimum is not None:
+        normalized = max(minimum, normalized)
+    if maximum is not None:
+        normalized = min(maximum, normalized)
+    return normalized
+
+
+def _normalize_token_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [token.strip() for token in value.replace(",", "\n").splitlines() if token.strip()]
+    if isinstance(value, list):
+        return [str(token or "").strip() for token in value if str(token or "").strip()]
+    return []
+
+
 def _normalize_config(config: dict[str, Any]) -> dict[str, Any]:
     merged = _merge_dict(DEFAULT_CONFIG, config)
     telegram = merged["telegram"]
@@ -82,46 +115,39 @@ def _normalize_config(config: dict[str, Any]) -> dict[str, Any]:
     sync = merged["sync"]
     app = merged["app"]
 
-    telegram["api_id"] = int(str(telegram.get("api_id", 0) or 0).strip() or 0)
-    telegram["api_hash"] = str(telegram.get("api_hash", "") or "").strip()
-    telegram["bot_token"] = str(telegram.get("bot_token", "") or "").strip()
-    telegram["bot_api_base_url"] = str(telegram.get("bot_api_base_url", "") or "").strip()
-    extra_bot_tokens = telegram.get("extra_bot_tokens", [])
-    if isinstance(extra_bot_tokens, str):
-        extra_bot_tokens = [token.strip() for token in extra_bot_tokens.replace(",", "\n").splitlines() if token.strip()]
-    elif isinstance(extra_bot_tokens, list):
-        extra_bot_tokens = [str(token or "").strip() for token in extra_bot_tokens if str(token or "").strip()]
-    else:
-        extra_bot_tokens = []
-    telegram["extra_bot_tokens"] = extra_bot_tokens
+    telegram["api_id"] = _normalize_int(telegram.get("api_id", 0), 0)
+    telegram["api_hash"] = _normalize_str(telegram.get("api_hash", ""))
+    telegram["bot_token"] = _normalize_str(telegram.get("bot_token", ""))
+    telegram["bot_api_base_url"] = _normalize_str(telegram.get("bot_api_base_url", ""))
+    telegram["extra_bot_tokens"] = _normalize_token_list(telegram.get("extra_bot_tokens", []))
 
-    proxy["enabled"] = bool(proxy.get("enabled", False))
-    proxy["host"] = str(proxy.get("host", "") or "").strip()
-    proxy["port"] = int(str(proxy.get("port", 7897) or 7897).strip() or 7897)
-    proxy["username"] = str(proxy.get("username", "") or "").strip()
-    proxy["password"] = str(proxy.get("password", "") or "").strip()
+    proxy["enabled"] = _normalize_bool(proxy.get("enabled", False))
+    proxy["host"] = _normalize_str(proxy.get("host", ""))
+    proxy["port"] = _normalize_int(proxy.get("port", 7897), 7897)
+    proxy["username"] = _normalize_str(proxy.get("username", ""))
+    proxy["password"] = _normalize_str(proxy.get("password", ""))
 
-    server["host"] = str(server.get("host", "127.0.0.1") or "127.0.0.1").strip()
-    server["port"] = int(str(server.get("port", 8011) or 8011).strip() or 8011)
-    server["auto_open_browser"] = bool(server.get("auto_open_browser", False))
+    server["host"] = _normalize_str(server.get("host", "127.0.0.1"), "127.0.0.1")
+    server["port"] = _normalize_int(server.get("port", 8011), 8011)
+    server["auto_open_browser"] = _normalize_bool(server.get("auto_open_browser", False))
 
     sync.pop("prefer_local_bot_api", None)
-    sync["default_delay"] = max(0.5, float(sync.get("default_delay", 5) or 5))
-    sync["force_send"] = bool(sync.get("force_send", False))
-    sync["add_external_source_header"] = bool(sync.get("add_external_source_header", False))
+    sync["default_delay"] = _normalize_float(sync.get("default_delay", 5), 5, minimum=0.5)
+    sync["force_send"] = _normalize_bool(sync.get("force_send", False))
+    sync["add_external_source_header"] = _normalize_bool(sync.get("add_external_source_header", False))
     sync["system_log_retention_limit"] = _normalize_int(sync.get("system_log_retention_limit", 1000), 1000, minimum=100)
     sync["message_log_retention_limit"] = _normalize_int(sync.get("message_log_retention_limit", 5000), 5000, minimum=100)
-    sync["bot_upload_max_mb"] = max(1.0, float(sync.get("bot_upload_max_mb", 50) or 50))
-    sync["bot_rate_limit_enabled"] = bool(sync.get("bot_rate_limit_enabled", False))
-    sync["bot_rate_limit_gb"] = max(0.1, float(sync.get("bot_rate_limit_gb", 10) or 10))
-    sync["bot_rate_limit_window_hours"] = max(1.0, float(sync.get("bot_rate_limit_window_hours", 24) or 24))
-    sync["bot_rate_limit_cooldown_minutes"] = max(1.0, float(sync.get("bot_rate_limit_cooldown_minutes", 300) or 300))
-    sync["realtime_sender"] = "user" if str(sync.get("realtime_sender", "bot")).strip() == "user" else "bot"
-    sync["realtime_fallback_to_user"] = bool(sync.get("realtime_fallback_to_user", True))
-    sync["realtime_hash_perturb"] = bool(sync.get("realtime_hash_perturb", False))
-    app["portable_mode"] = bool(app.get("portable_mode", True))
-    app["log_level"] = str(app.get("log_level", "INFO") or "INFO").strip().upper() or "INFO"
-    app["debug_terminal_logs"] = bool(app.get("debug_terminal_logs", False))
+    sync["bot_upload_max_mb"] = _normalize_float(sync.get("bot_upload_max_mb", 50), 50, minimum=1.0)
+    sync["bot_rate_limit_enabled"] = _normalize_bool(sync.get("bot_rate_limit_enabled", False))
+    sync["bot_rate_limit_gb"] = _normalize_float(sync.get("bot_rate_limit_gb", 10), 10, minimum=0.1)
+    sync["bot_rate_limit_window_hours"] = _normalize_float(sync.get("bot_rate_limit_window_hours", 24), 24, minimum=1.0)
+    sync["bot_rate_limit_cooldown_minutes"] = _normalize_float(sync.get("bot_rate_limit_cooldown_minutes", 300), 300, minimum=1.0)
+    sync["realtime_sender"] = "user" if _normalize_str(sync.get("realtime_sender", "bot")) == "user" else "bot"
+    sync["realtime_fallback_to_user"] = _normalize_bool(sync.get("realtime_fallback_to_user", True), True)
+    sync["realtime_hash_perturb"] = _normalize_bool(sync.get("realtime_hash_perturb", False))
+    app["portable_mode"] = _normalize_bool(app.get("portable_mode", True), True)
+    app["log_level"] = _normalize_str(app.get("log_level", "INFO"), "INFO").upper() or "INFO"
+    app["debug_terminal_logs"] = _normalize_bool(app.get("debug_terminal_logs", False))
     return merged
 
 
