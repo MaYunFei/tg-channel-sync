@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from copy import deepcopy
 from typing import Any
 
@@ -130,8 +131,8 @@ def _normalize_config(config: dict[str, Any]) -> dict[str, Any]:
     proxy["username"] = _normalize_str(proxy.get("username", ""))
     proxy["password"] = _normalize_str(proxy.get("password", ""))
 
-    server["host"] = _normalize_str(server.get("host", "127.0.0.1"), "127.0.0.1")
-    server["port"] = _normalize_int(server.get("port", 8011), 8011)
+    server["host"] = os.getenv("TG_SYNC_HOST", os.getenv("HOST", _normalize_str(server.get("host", "127.0.0.1"), "127.0.0.1")))
+    server["port"] = _normalize_int(os.getenv("TG_SYNC_PORT", os.getenv("PORT", server.get("port", 8011))), 8011)
     server["auto_open_browser"] = _normalize_bool(server.get("auto_open_browser", False))
 
     sync.pop("prefer_local_bot_api", None)
@@ -160,8 +161,7 @@ def load_config() -> dict[str, Any]:
     cfg_path = config_file()
     if not cfg_path.exists():
         config = deepcopy(DEFAULT_CONFIG)
-        save_config(config)
-        return deepcopy(config)
+        return save_config(config)
 
     try:
         config = json.loads(cfg_path.read_text(encoding="utf-8"))

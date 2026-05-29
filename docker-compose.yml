@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  tg-channel-sync:
+    build: .
+    container_name: tg-channel-sync
+    restart: always
+    ports:
+      - "127.0.0.1:8011:8011"
+    environment:
+      - TZ=Asia/Shanghai
+      - TG_SYNC_HOST=0.0.0.0
+      - TG_SYNC_PORT=8011
+    volumes:
+      - ./data:/app/data
+      # 如果想在宿主机直接修改 config.json，请先在本地 touch config.json 创建文件，再取消下行注释
+      # - ./config.json:/app/config.json
