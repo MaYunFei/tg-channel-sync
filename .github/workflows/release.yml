@@ -1,0 +1,49 @@
+name: Release App
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-windows:
+    name: Build & Release Windows Client
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Create venv and Install Dependencies
+        shell: pwsh
+        run: |
+          python -m venv venv
+          ./venv/Scripts/python -m pip install --upgrade pip
+          ./venv/Scripts/python -m pip install -r requirements.txt pyinstaller
+
+      - name: Build Portable and Full Zips
+        shell: pwsh
+        run: |
+          ./build-portable.ps1
+
+      - name: Upload Release Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist-portable/*.zip
+          # 【如何手动润色更新日志？】以下有两种推荐方式：
+          # 方式 A：将 draft 设为 true。这样推送 tag 时会先创建一个“未发布”的 Release 草稿，
+          #        你可以登录 GitHub Web 页面编辑并完美润色更新日志后，再手动点击 "Publish" 发布。
+          # 方式 B：如果想完全在本地写日志，可以在这里加上：body_path: path/to/changelog.md
+          draft: true
+          prerelease: false
+          generate_release_notes: true # 默认为 true，GitHub 会自动对比 commits 生成日志
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
