@@ -107,6 +107,8 @@ pyro_user_app = None
 upload_bots = []
 bot_api_mode = "cloud"
 dp = Dispatcher()
+from services.link_extractor_router import link_extractor_router
+dp.include_router(link_extractor_router)
 MEDIA_GROUP_FLUSH_DELAY_SECONDS = 2.0
 media_group_cache = {}
 media_group_tasks = {}
