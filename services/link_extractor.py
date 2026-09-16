@@ -177,6 +177,26 @@ def _get_temp_dir() -> str:
     return tempfile.mkdtemp(dir=temp_base)
 
 
+async def _download_media_thumb(pyro_app: Any, msg: Any, msg_type: str, temp_dir: str) -> str | None:
+    """尝试下载原消息视频/音频的封面图 (thumbnail)"""
+    media_obj = getattr(msg, msg_type, None)
+    thumbs = getattr(media_obj, "thumbs", None) if media_obj else None
+    if not thumbs:
+        return None
+    thumb = thumbs[-1]
+    thumb_ref = getattr(thumb, "file_id", None)
+    if not thumb_ref:
+        return None
+    thumb_path = os.path.join(temp_dir, f"{getattr(msg, 'id', 'media')}_{msg_type}_thumb.jpg")
+    try:
+        downloaded = await pyro_app.download_media(thumb_ref, file_name=thumb_path)
+        if isinstance(downloaded, str) and os.path.exists(downloaded):
+            return downloaded
+    except Exception:
+        pass
+    return None
+
+
 async def extract_and_forward(
     chat_id: int | str,
     message_id: int,
@@ -292,6 +312,16 @@ async def _extract_single_message(
 
         caption_html = msg.caption.html if hasattr(getattr(msg, "caption", None), "html") else getattr(msg, "caption", "")
 
+        # 提取原媒体的元数据（如视频宽高 width、height、时长 duration、流式播放等）以及封面缩略图
+        metadata = {}
+        try:
+            from sync_worker.core.media import extract_upload_metadata
+            metadata = extract_upload_metadata(msg, media_type) or {}
+        except Exception:
+            pass
+
+        thumb_path = await _download_media_thumb(pyro_user_app, msg, media_type, temp_dir)
+
         if status_callback:
             await status_callback("⬆️ 正在解除限制并上传中...")
 
@@ -304,6 +334,8 @@ async def _extract_single_message(
             sender_user_id=sender_user_id,
             pyro_user_app=pyro_user_app,
             aiogram_bot=aiogram_bot,
+            metadata=metadata,
+            thumb_path=thumb_path,
         )
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
@@ -350,11 +382,23 @@ async def _extract_media_group(
             path = await pyro_user_app.download_media(item, file_name=dest)
             if path and os.path.exists(path):
                 cap = item.caption.html if hasattr(getattr(item, "caption", None), "html") else getattr(item, "caption", "")
+                
+                # 提取元数据与缩略图
+                item_meta = {}
+                try:
+                    from sync_worker.core.media import extract_upload_metadata
+                    item_meta = extract_upload_metadata(item, item_type) or {}
+                except Exception:
+                    pass
+                item_thumb = await _download_media_thumb(pyro_user_app, item, item_type, temp_dir)
+
                 downloaded.append({
                     "path": path,
                     "type": item_type,
                     "caption": cap,
                     "size": getattr(item_attr, "file_size", 0) or os.path.getsize(path),
+                    "metadata": item_meta,
+                    "thumb_path": item_thumb,
                 })
 
         if not downloaded:
@@ -411,10 +455,13 @@ async def _dispatch_single_media(
     sender_user_id: int,
     pyro_user_app: Any,
     aiogram_bot: Any,
+    metadata: dict[str, Any] | None = None,
+    thumb_path: str | None = None,
 ) -> dict[str, Any]:
     """发送单个媒体"""
     from aiogram.types import FSInputFile
 
+    metadata = metadata or {}
     actual_target = _resolve_target(target_chat_id, sender_user_id)
     is_to_user = (actual_target == sender_user_id)
     is_saved = (actual_target == "saved")
@@ -422,20 +469,41 @@ async def _dispatch_single_media(
 
     # 1. 目标是收藏夹
     if is_saved:
+        dest = "me"
         method = getattr(pyro_user_app, f"send_{media_type}", pyro_user_app.send_document)
-        await method("me", file_path, caption=caption_html, parse_mode=PyroParseMode.HTML)
+        pyro_kwargs = dict(metadata)
+        if thumb_path and os.path.exists(thumb_path):
+            pyro_kwargs["thumb"] = thumb_path
+        await method(dest, file_path, caption=caption_html, parse_mode=PyroParseMode.HTML, **pyro_kwargs)
         return {"success": True, "target": "saved", "type": media_type}
 
     # 2. 如果文件超过 50MB 或者是动画/贴纸等 Bot 限制类型，直接用辅助账号发送
     if is_large or not aiogram_bot:
-        dest = "me" if actual_target == "saved" else actual_target
+        dest = actual_target
         method = getattr(pyro_user_app, f"send_{media_type}", pyro_user_app.send_document)
-        await method(dest, file_path, caption=caption_html, parse_mode=PyroParseMode.HTML)
+        pyro_kwargs = dict(metadata)
+        if thumb_path and os.path.exists(thumb_path):
+            pyro_kwargs["thumb"] = thumb_path
+        await method(dest, file_path, caption=caption_html, parse_mode=PyroParseMode.HTML, **pyro_kwargs)
         return {"success": True, "target": str(actual_target), "type": media_type, "via": "user"}
 
     # 3. 文件小于 50MB，使用 Bot API 发送
     input_file = FSInputFile(file_path)
     kwargs = {"chat_id": actual_target, "caption": caption_html, "parse_mode": "HTML"}
+    
+    # 注入元数据与缩略图到 Bot API 请求中
+    if media_type == "video":
+        for k in ("duration", "width", "height", "supports_streaming"):
+            if k in metadata:
+                kwargs[k] = metadata[k]
+        if thumb_path and os.path.exists(thumb_path):
+            kwargs["thumbnail"] = FSInputFile(thumb_path)
+    elif media_type in ("audio", "voice"):
+        if "duration" in metadata:
+            kwargs["duration"] = metadata["duration"]
+        if thumb_path and os.path.exists(thumb_path):
+            kwargs["thumbnail"] = FSInputFile(thumb_path)
+
     try:
         if media_type == "photo":
             await aiogram_bot.send_photo(photo=input_file, **kwargs)
@@ -460,7 +528,10 @@ async def _dispatch_single_media(
             raise RuntimeError(f"无法通过 Bot 发送给用户: {exc}")
         # 回退辅助账号
         method = getattr(pyro_user_app, f"send_{media_type}", pyro_user_app.send_document)
-        await method(actual_target, file_path, caption=caption_html, parse_mode=PyroParseMode.HTML)
+        pyro_kwargs = dict(metadata)
+        if thumb_path and os.path.exists(thumb_path):
+            pyro_kwargs["thumb"] = thumb_path
+        await method(actual_target, file_path, caption=caption_html, parse_mode=PyroParseMode.HTML, **pyro_kwargs)
         return {"success": True, "target": str(actual_target), "type": media_type, "via": "user_fallback"}
 
 
@@ -496,7 +567,26 @@ async def _dispatch_media_group(
         aio_media = []
         for item in items:
             media_cls = aio_cls_map.get(item["type"], AioDoc)
-            aio_media.append(media_cls(media=FSInputFile(item["path"]), caption=item.get("caption", ""), parse_mode="HTML"))
+            m_kwargs = {
+                "media": FSInputFile(item["path"]),
+                "caption": item.get("caption", ""),
+                "parse_mode": "HTML",
+            }
+            item_meta = item.get("metadata") or {}
+            thumb_path = item.get("thumb_path")
+            if item["type"] == "video":
+                for k in ("duration", "width", "height", "supports_streaming"):
+                    if k in item_meta:
+                        m_kwargs[k] = item_meta[k]
+                if thumb_path and os.path.exists(thumb_path):
+                    m_kwargs["thumbnail"] = FSInputFile(thumb_path)
+            elif item["type"] in ("audio", "voice"):
+                if "duration" in item_meta:
+                    m_kwargs["duration"] = item_meta["duration"]
+                if thumb_path and os.path.exists(thumb_path):
+                    m_kwargs["thumbnail"] = FSInputFile(thumb_path)
+
+            aio_media.append(media_cls(**m_kwargs))
 
         try:
             await aiogram_bot.send_media_group(chat_id=actual_target, media=aio_media)
@@ -518,7 +608,27 @@ async def _dispatch_media_group(
     }
     for item in items:
         media_cls = cls_map.get(item["type"], InputMediaDocument)
-        pyro_media.append(media_cls(item["path"], caption=item.get("caption", ""), parse_mode=PyroParseMode.HTML))
+        p_kwargs = {
+            "media": item["path"],
+            "caption": item.get("caption", ""),
+            "parse_mode": PyroParseMode.HTML,
+        }
+        item_meta = item.get("metadata") or {}
+        thumb_path = item.get("thumb_path")
+        if item["type"] == "video":
+            for k in ("duration", "width", "height", "supports_streaming"):
+                if k in item_meta:
+                    p_kwargs[k] = item_meta[k]
+            if thumb_path and os.path.exists(thumb_path):
+                p_kwargs["thumb"] = thumb_path
+        elif item["type"] in ("audio", "voice"):
+            if "duration" in item_meta:
+                p_kwargs["duration"] = item_meta["duration"]
+            if thumb_path and os.path.exists(thumb_path):
+                p_kwargs["thumb"] = thumb_path
+
+        pyro_media.append(media_cls(**p_kwargs))
+
     await pyro_user_app.send_media_group(dest, pyro_media)
     return {"success": True, "target": str(actual_target), "count": len(items), "via": "user"}
 
