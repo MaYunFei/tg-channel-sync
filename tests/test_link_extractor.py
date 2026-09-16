@@ -137,3 +137,28 @@ class TestLinkExtractor(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(res["success"])
         self.assertEqual(res["via"], "bot")
         aiobot_mock.send_photo.assert_called_once()
+
+    @patch("services.link_extractor_router.extract_and_forward", new_callable=AsyncMock)
+    async def test_queue_concurrency(self, mock_extract):
+        from services.link_extractor_router import _process_extracted_links
+        import time
+
+        order_executed = []
+        async def slow_extract(c, m, t, **kwargs):
+            await asyncio.sleep(0.05)
+            order_executed.append(m)
+
+        mock_extract.side_effect = slow_extract
+
+        msg1 = AsyncMock()
+        msg1.reply = AsyncMock(return_value=AsyncMock())
+        msg2 = AsyncMock()
+        msg2.reply = AsyncMock(return_value=AsyncMock())
+
+        t1 = asyncio.create_task(_process_extracted_links(msg1, [{"chat_id": "c1", "message_id": 100}], "me", 9999))
+        t2 = asyncio.create_task(_process_extracted_links(msg2, [{"chat_id": "c1", "message_id": 101}], "me", 9999))
+
+        await asyncio.gather(t1, t2)
+        self.assertEqual(order_executed, [100, 101])
+        # Verify msg2 received a queuing message
+        msg2.reply.assert_any_call("⏳ 前方还有 1 个任务正在处理，已为您排队...")

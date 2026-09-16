@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -20,6 +21,11 @@ from services.link_extractor import (
 logger = logging.getLogger("link_extractor_router")
 
 link_extractor_router = Router(name="link_extractor_router")
+
+# 用户级串行执行锁与排队计数器
+_user_locks: dict[int, asyncio.Lock] = {}
+_user_waiters: dict[int, int] = {}
+
 
 
 def _get_help_text(default_target: str) -> str:
@@ -220,50 +226,76 @@ async def _process_extracted_links(
     target: str,
     user_id: int,
 ):
-    """统一处理链接提取流水线"""
+    """统一处理链接提取流水线（按用户排队，保序执行）"""
     import bot_engine
 
     pyro = getattr(bot_engine, "pyro_user_app", None)
     aiobot = message.bot or getattr(bot_engine, "aiogram_bot", None)
 
-    status_msg = await message.reply("⏳ 正在解析链接并准备下载受限内容...")
+    # 获取或初始化用户的排队锁
+    lock = _user_locks.setdefault(user_id, asyncio.Lock())
 
-    async def update_status(text: str):
+    # 如果锁已被占用，提示正在排队
+    status_msg = None
+    if lock.locked():
+        _user_waiters[user_id] = _user_waiters.get(user_id, 0) + 1
+        pos = _user_waiters[user_id]
+        status_msg = await message.reply(f"⏳ 前方还有 {pos} 个任务正在处理，已为您排队...")
         try:
-            await status_msg.edit_text(text)
-        except Exception:
-            pass
-
-    success_count = 0
-    fail_count = 0
-    total = len(links)
-
-    for idx, item in enumerate(links, start=1):
-        c_id = item["chat_id"]
-        m_id = item["message_id"]
-        prefix = f"[{idx}/{total}] " if total > 1 else ""
-
-        try:
-            await update_status(f"{prefix}⏳ 正在提取 ({c_id} / {m_id})...")
-            await extract_and_forward(
-                c_id,
-                m_id,
-                target,
-                pyro_user_app=pyro,
-                aiogram_bot=aiobot,
-                sender_user_id=user_id,
-                status_callback=lambda txt: update_status(f"{prefix}{txt}"),
-            )
-            success_count += 1
-        except Exception as exc:
-            logger.error(f"提取链接失败: {c_id}/{m_id}, 错误: {exc}", exc_info=True)
-            fail_count += 1
-            await message.reply(f"❌ 链接处理失败 (ID: {m_id}): {exc}")
-
-    # 最终状态更新
-    if success_count > 0 and fail_count == 0:
-        await update_status(f"✅ 处理完成！已成功解除限制并投递到: <code>{target}</code>")
-    elif success_count > 0 and fail_count > 0:
-        await update_status(f"⚠️ 处理完成：{success_count} 个成功，{fail_count} 个失败。投递目标: <code>{target}</code>")
+            await lock.acquire()
+        finally:
+            _user_waiters[user_id] = max(0, _user_waiters.get(user_id, 1) - 1)
     else:
-        await update_status("❌ 处理失败，请检查上方报错信息。")
+        await lock.acquire()
+
+    try:
+        if status_msg is None:
+            status_msg = await message.reply("⏳ 正在解析链接并准备下载受限内容...")
+        else:
+            try:
+                await status_msg.edit_text("⏳ 轮到您的任务了，正在解析链接并准备下载...")
+            except Exception:
+                pass
+
+        async def update_status(text: str):
+            try:
+                await status_msg.edit_text(text)
+            except Exception:
+                pass
+
+        success_count = 0
+        fail_count = 0
+        total = len(links)
+
+        for idx, item in enumerate(links, start=1):
+            c_id = item["chat_id"]
+            m_id = item["message_id"]
+            prefix = f"[{idx}/{total}] " if total > 1 else ""
+
+            try:
+                await update_status(f"{prefix}⏳ 正在提取 ({c_id} / {m_id})...")
+                await extract_and_forward(
+                    c_id,
+                    m_id,
+                    target,
+                    pyro_user_app=pyro,
+                    aiogram_bot=aiobot,
+                    sender_user_id=user_id,
+                    status_callback=lambda txt: update_status(f"{prefix}{txt}"),
+                )
+                success_count += 1
+            except Exception as exc:
+                logger.error(f"提取链接失败: {c_id}/{m_id}, 错误: {exc}", exc_info=True)
+                fail_count += 1
+                await message.reply(f"❌ 链接处理失败 (ID: {m_id}): {exc}")
+
+        # 最终状态更新
+        if success_count > 0 and fail_count == 0:
+            await update_status(f"✅ 处理完成！已成功解除限制并投递到: <code>{target}</code>")
+        elif success_count > 0 and fail_count > 0:
+            await update_status(f"⚠️ 处理完成：{success_count} 个成功，{fail_count} 个失败。投递目标: <code>{target}</code>")
+        else:
+            await update_status("❌ 处理失败，请检查上方报错信息。")
+    finally:
+        lock.release()
+
