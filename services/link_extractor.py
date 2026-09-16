@@ -148,6 +148,29 @@ async def is_user_authorized(user_id: int, pyro_client=None) -> bool:
     return False
 
 
+def _build_download_filename(msg: Any, item_attr: Any, media_type: str, idx: int | None = None) -> str:
+    """构造带有正确扩展名的本地文件名，避免 Telegram 上传报 PHOTO_EXT_INVALID 等错误"""
+    original_name = str(getattr(item_attr, "file_name", "") or "").strip()
+    safe_name = re.sub(r'[<>:"/\\|?*]+', "_", original_name)
+    base_name, ext = os.path.splitext(safe_name)
+    if not ext:
+        default_ext = {
+            "photo": ".jpg",
+            "video": ".mp4",
+            "animation": ".mp4",
+            "audio": ".mp3",
+            "voice": ".ogg",
+            "sticker": ".webp",
+            "document": "",
+        }
+        ext = default_ext.get(media_type, "")
+    if not base_name:
+        mid = getattr(msg, "id", "media")
+        base_name = f"{media_type}_{mid}"
+    prefix = f"{idx}_" if idx is not None else ""
+    return f"{prefix}{base_name}{ext}"
+
+
 def _get_temp_dir() -> str:
     temp_base = os.path.join(os.getcwd(), "temp", "link_extractor")
     os.makedirs(temp_base, exist_ok=True)
@@ -257,7 +280,7 @@ async def _extract_single_message(
             raise RuntimeError("未识别到支持的消息内容或媒体。")
 
         file_size = getattr(media_attr, "file_size", 0) or 0
-        file_name = getattr(media_attr, "file_name", "") or f"{media_type}_{msg.id}"
+        file_name = _build_download_filename(msg, media_attr, media_type)
 
         size_mb = file_size / (1024 * 1024)
         if status_callback:
@@ -322,8 +345,8 @@ async def _extract_media_group(
                     item_attr = val
                     item_type = attr
                     break
-            name = getattr(item_attr, "file_name", "") or f"item_{item.id}"
-            dest = os.path.join(temp_dir, f"{idx}_{name}")
+            name = _build_download_filename(item, item_attr, item_type, idx=idx)
+            dest = os.path.join(temp_dir, name)
             path = await pyro_user_app.download_media(item, file_name=dest)
             if path and os.path.exists(path):
                 cap = item.caption.html if hasattr(getattr(item, "caption", None), "html") else getattr(item, "caption", "")
@@ -432,7 +455,9 @@ async def _dispatch_single_media(
             await aiogram_bot.send_document(document=input_file, **kwargs)
         return {"success": True, "target": str(actual_target), "type": media_type, "via": "bot"}
     except Exception as exc:
-        logger.warning(f"Bot API 发送失败，尝试辅助账号回退: {exc}")
+        logger.warning(f"Bot API 发送失败: {exc}")
+        if is_to_user:
+            raise RuntimeError(f"无法通过 Bot 发送给用户: {exc}")
         # 回退辅助账号
         method = getattr(pyro_user_app, f"send_{media_type}", pyro_user_app.send_document)
         await method(actual_target, file_path, caption=caption_html, parse_mode=PyroParseMode.HTML)
@@ -456,6 +481,7 @@ async def _dispatch_media_group(
     from aiogram.types import FSInputFile
 
     actual_target = _resolve_target(target_chat_id, sender_user_id)
+    is_to_user = (actual_target == sender_user_id)
     is_saved = (actual_target == "saved")
     any_large = any(item.get("size", 0) > 50 * 1024 * 1024 for item in items)
 
@@ -476,7 +502,10 @@ async def _dispatch_media_group(
             await aiogram_bot.send_media_group(chat_id=actual_target, media=aio_media)
             return {"success": True, "target": str(actual_target), "count": len(items), "via": "bot"}
         except Exception as exc:
-            logger.warning(f"Bot API 发送媒体组失败，尝试转用辅助账号: {exc}")
+            logger.warning(f"Bot API 发送媒体组失败: {exc}")
+            if is_to_user:
+                raise RuntimeError(f"无法通过 Bot 发送给用户: {exc}")
+            logger.info("尝试转用辅助账号发送...")
 
     # 目标为收藏夹、或有超大文件、或 Bot 失败时，走辅助账号
     dest = "me" if is_saved else actual_target
