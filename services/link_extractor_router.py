@@ -224,7 +224,7 @@ async def _process_extracted_links(
     import bot_engine
 
     pyro = getattr(bot_engine, "pyro_user_app", None)
-    aiobot = getattr(bot_engine, "aiogram_bot", None)
+    aiobot = message.bot or getattr(bot_engine, "aiogram_bot", None)
 
     status_msg = await message.reply("⏳ 正在解析链接并准备下载受限内容...")
 

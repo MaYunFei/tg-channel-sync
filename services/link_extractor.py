@@ -459,52 +459,39 @@ async def _dispatch_media_group(
     is_saved = (actual_target == "saved")
     any_large = any(item.get("size", 0) > 50 * 1024 * 1024 for item in items)
 
-    # 如果目标是收藏夹或包含大文件或无 bot，走辅助账号
-    if is_saved or any_large or not aiogram_bot:
-        dest = "me" if is_saved else actual_target
-        pyro_media = []
-        cls_map = {
-            "photo": InputMediaPhoto,
-            "video": InputMediaVideo,
-            "audio": InputMediaAudio,
-            "document": InputMediaDocument,
+    # 优先使用 Bot API 发送（只要没有超过 50MB 且 aiogram_bot 可用，并且目标不是收藏夹）
+    if aiogram_bot and not is_saved and not any_large:
+        aio_cls_map = {
+            "photo": AioPhoto,
+            "video": AioVid,
+            "audio": AioAudio,
+            "document": AioDoc,
         }
+        aio_media = []
         for item in items:
-            media_cls = cls_map.get(item["type"], InputMediaDocument)
-            pyro_media.append(media_cls(item["path"], caption=item.get("caption", ""), parse_mode=PyroParseMode.HTML))
-        await pyro_user_app.send_media_group(dest, pyro_media)
-        return {"success": True, "target": str(actual_target), "count": len(items), "via": "user"}
+            media_cls = aio_cls_map.get(item["type"], AioDoc)
+            aio_media.append(media_cls(media=FSInputFile(item["path"]), caption=item.get("caption", ""), parse_mode="HTML"))
 
-    # 尝试 Bot API
-    aio_cls_map = {
-        "photo": AioPhoto,
-        "video": AioVid,
-        "audio": AioAudio,
-        "document": AioDoc,
+        try:
+            await aiogram_bot.send_media_group(chat_id=actual_target, media=aio_media)
+            return {"success": True, "target": str(actual_target), "count": len(items), "via": "bot"}
+        except Exception as exc:
+            logger.warning(f"Bot API 发送媒体组失败，尝试转用辅助账号: {exc}")
+
+    # 目标为收藏夹、或有超大文件、或 Bot 失败时，走辅助账号
+    dest = "me" if is_saved else actual_target
+    pyro_media = []
+    cls_map = {
+        "photo": InputMediaPhoto,
+        "video": InputMediaVideo,
+        "audio": InputMediaAudio,
+        "document": InputMediaDocument,
     }
-    aio_media = []
     for item in items:
-        media_cls = aio_cls_map.get(item["type"], AioDoc)
-        aio_media.append(media_cls(media=FSInputFile(item["path"]), caption=item.get("caption", ""), parse_mode="HTML"))
-
-    try:
-        await aiogram_bot.send_media_group(chat_id=actual_target, media=aio_media)
-        return {"success": True, "target": str(actual_target), "count": len(items), "via": "bot"}
-    except Exception as exc:
-        logger.warning(f"Bot API 发送媒体组失败，转用辅助账号: {exc}")
-        dest = "me" if is_saved else actual_target
-        pyro_media = []
-        cls_map = {
-            "photo": InputMediaPhoto,
-            "video": InputMediaVideo,
-            "audio": InputMediaAudio,
-            "document": InputMediaDocument,
-        }
-        for item in items:
-            media_cls = cls_map.get(item["type"], InputMediaDocument)
-            pyro_media.append(media_cls(item["path"], caption=item.get("caption", ""), parse_mode=PyroParseMode.HTML))
-        await pyro_user_app.send_media_group(dest, pyro_media)
-        return {"success": True, "target": str(actual_target), "count": len(items), "via": "user_fallback"}
+        media_cls = cls_map.get(item["type"], InputMediaDocument)
+        pyro_media.append(media_cls(item["path"], caption=item.get("caption", ""), parse_mode=PyroParseMode.HTML))
+    await pyro_user_app.send_media_group(dest, pyro_media)
+    return {"success": True, "target": str(actual_target), "count": len(items), "via": "user"}
 
 
 def _resolve_target(target: str | int, sender_user_id: int) -> int | str:
