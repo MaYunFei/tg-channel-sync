@@ -496,11 +496,16 @@ async def _dispatch_media_group(
 
 def _resolve_target(target: str | int, sender_user_id: int) -> int | str:
     """解析目标参数为最终发送目标 peer"""
-    if str(target).lower() == "me":
+    t_str = str(target).strip()
+    if t_str.lower() == "me":
         return sender_user_id
-    if str(target).lower() == "saved":
+    if t_str.lower() == "saved":
         return "saved"
     try:
-        return int(target)
+        val = int(t_str)
+        # 如果用户输入的是普通频道纯数字ID (如 2264185942，长度 >= 9 且 > 0)，自动补齐 -100 前缀
+        if val > 0 and len(str(val)) >= 9:
+            val = int(f"-100{val}")
+        return val
     except ValueError:
         return target
