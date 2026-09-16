@@ -107,8 +107,6 @@ pyro_user_app = None
 upload_bots = []
 bot_api_mode = "cloud"
 dp = Dispatcher()
-from services.link_extractor_router import link_extractor_router
-dp.include_router(link_extractor_router)
 MEDIA_GROUP_FLUSH_DELAY_SECONDS = 2.0
 media_group_cache = {}
 media_group_tasks = {}
@@ -1048,7 +1046,6 @@ async def handle_new_post(message: Message):
             await finish_saved_messages_operation(saved_operation)
 
 
-@dp.message()
 async def debug_log_bot_message(message: Message):
     if not _debug_terminal_logs_enabled():
         return
@@ -1064,6 +1061,17 @@ async def debug_log_bot_message(message: Message):
         getattr(message, "message_id", None),
         _message_preview(message),
     )
+
+
+@dp.message.outer_middleware()
+async def debug_log_bot_message_middleware(handler, event, data):
+    if isinstance(event, Message):
+        await debug_log_bot_message(event)
+    return await handler(event, data)
+
+
+from services.link_extractor_router import link_extractor_router
+dp.include_router(link_extractor_router)
 
 
 @dp.edited_channel_post()

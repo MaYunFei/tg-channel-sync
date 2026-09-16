@@ -60,40 +60,58 @@ async def get_default_target() -> str:
     """获取默认投递目标，默认为 'me' (当前私聊)"""
     import database as db
 
-    settings = await db.get_all_settings()
-    target = settings.get(SETTING_TARGET_KEY, "").strip()
-    return target if target else "me"
+    try:
+        await db.init_db()
+        settings = await db.get_all_settings()
+        target = settings.get(SETTING_TARGET_KEY, "").strip()
+        return target if target else "me"
+    except Exception as exc:
+        logger.warning("获取默认投递目标失败，降级为 'me': %s", exc)
+        return "me"
 
 
 async def set_default_target(target: str) -> None:
     """保存默认投递目标"""
     import database as db
 
-    await db.update_settings({SETTING_TARGET_KEY: target.strip()})
+    try:
+        await db.init_db()
+        await db.update_settings({SETTING_TARGET_KEY: target.strip()})
+    except Exception as exc:
+        logger.error("保存默认投递目标失败: %s", exc)
 
 
 async def get_allowed_admins() -> set[int]:
     """获取允许使用该提取器的管理员 User ID 列表"""
     import database as db
 
-    settings = await db.get_all_settings()
-    admins_str = settings.get(SETTING_ADMINS_KEY, "").strip()
-    admins = set()
-    if admins_str:
-        for part in admins_str.split(","):
-            part = part.strip()
-            if part.isdigit():
-                admins.add(int(part))
-    return admins
+    try:
+        await db.init_db()
+        settings = await db.get_all_settings()
+        admins_str = settings.get(SETTING_ADMINS_KEY, "").strip()
+        admins = set()
+        if admins_str:
+            for part in admins_str.split(","):
+                part = part.strip()
+                if part.isdigit():
+                    admins.add(int(part))
+        return admins
+    except Exception as exc:
+        logger.warning("获取管理员列表失败: %s", exc)
+        return set()
 
 
 async def add_allowed_admin(user_id: int) -> None:
     """添加管理员 ID"""
     import database as db
 
-    admins = await get_allowed_admins()
-    admins.add(user_id)
-    await db.update_settings({SETTING_ADMINS_KEY: ",".join(str(uid) for uid in sorted(admins))})
+    try:
+        await db.init_db()
+        admins = await get_allowed_admins()
+        admins.add(user_id)
+        await db.update_settings({SETTING_ADMINS_KEY: ",".join(str(uid) for uid in sorted(admins))})
+    except Exception as exc:
+        logger.error("添加管理员 ID 失败: %s", exc)
 
 
 async def is_user_authorized(user_id: int, pyro_client=None) -> bool:
@@ -103,17 +121,24 @@ async def is_user_authorized(user_id: int, pyro_client=None) -> bool:
     2. 若系统配置的 link_extractor_admins 中包含该 ID；
     3. 若系统当前 link_extractor_admins 为空，且辅助账号未登录，默认暂不开放（需私聊绑定或通过 WebUI 登录）。
     """
-    if pyro_client and getattr(pyro_client, "is_connected", False):
+    if pyro_client:
         try:
-            me = pyro_client.me
-            if me and me.id == user_id:
+            me = getattr(pyro_client, "me", None)
+            if me and getattr(me, "id", None) == user_id:
                 return True
+            if hasattr(pyro_client, "get_me") and getattr(pyro_client, "is_connected", False):
+                me = await pyro_client.get_me()
+                if me and getattr(me, "id", None) == user_id:
+                    return True
         except Exception:
             pass
 
-    allowed = await get_allowed_admins()
-    if user_id in allowed:
-        return True
+    try:
+        allowed = await get_allowed_admins()
+        if user_id in allowed:
+            return True
+    except Exception:
+        pass
 
     # 如果系统完全没有设置任何管理员，且辅助账号也未连接，允许通过环境变量 ADMIN_USER_ID
     env_admin = os.environ.get("ADMIN_USER_ID", "").strip()
